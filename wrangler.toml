@@ -15,5 +15,5 @@ binding = "CONFIG"
 
 [vars]
 ONBOARD_API = "https://orbit-package.com/api/onboard"
-GOOGLE_CLIENT_ID = ""
-GOOGLE_CLIENT_SECRET = ""
+GOOGLE_CLIENT_ID = "964060622908-3bu234gembpqbk6khked80k2sj5eikk9.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET = ""   # 導入コードを入れると入る

@@ -111,6 +111,7 @@ async function afterInstall(env, origin, gh) {
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 async function googleStart(env) {
   if (!env.GOOGLE_CLIENT_ID) return { error: 'Google の設定（GOOGLE_CLIENT_ID）がまだありません。担当者にお知らせください' };
+  if (!env.GOOGLE_CLIENT_SECRET) return { error: '先に「導入コード」を入れてください。入れたあと2〜3分で使えるようになります' };   // 合言葉は導入コードの束で入る
   const r = await fetch('https://oauth2.googleapis.com/device/code', { method: 'POST', body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, scope: GOOGLE_SCOPE }) });
   const j = await r.json();
   if (!r.ok) return { error: `Google の準備に失敗しました（${j.error || r.status}）` };
