@@ -1,3 +1,3 @@
-# Deploy のときに入れる秘密の設定（Cloudflare の画面に欄が出ます）
-# SETUP_PASSWORD：設定のページ（/setup）に入る合言葉。御社で決めてください（8文字以上）
+# 秘密の設定の見本（B の形では受付が入れるので、ふつうは要らない）
+# SETUP_PASSWORD：設定のページ（/setup）に合言葉でも入れるようにするとき（8文字以上）
 SETUP_PASSWORD=

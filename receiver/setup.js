@@ -1,10 +1,10 @@
-// 設定のページ（2026-10-18）：お客様が「Deploy to Cloudflare」で置いた Worker の /setup。上から順に埋めるだけで導入が終わる。
+// 設定のページ（2026-10-18）：受付がお客様の Cloudflare に置いた Worker の /setup（B の形：「Cloudflare で許可」のあと自動で開く）。上から順に埋めるだけで導入が終わる。
 //   1. GitHub につなぐ（ボタン1つ・お客様名義の GitHub App）  2. 導入コード（担当者の下書きを取り込む）
 //   3. Google で許可（シートの置き場をこの仕組みが作る・drive.file だけ）  4. 鍵（Discord のウェブフック・Buffer・メール・Claude）
 //   5. 仕上げ（会社の設定とレシピを入れ、診断を流す）
 // 承認のページ /a/<Issue>?s=<署名>（Discord の知らせのリンクから）と、指示のページ /i も、ここで受ける。
 // 入口は合言葉（Deploy のときにお客様が決めた SETUP_PASSWORD）。鍵の値は画面にも記録にも二度と出さない。
-import { repoApi, manifest, convert, putSecret, commitFiles, installationToken, call } from './github_app.js';
+import { repoApi, manifest, convert, putSecret, commitFiles, installationToken, call, userToken, ensureRepo } from './github_app.js';
 
 const enc = new TextEncoder();
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -31,13 +31,20 @@ const page = (title, body) => new Response(`<!doctype html><html lang="ja"><head
   { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' } });
 const go = (to, cookie) => new Response(null, { status: 303, headers: { location: to, ...(cookie ? { 'set-cookie': cookie } : {}) } });
 
+async function viewState(env) { return { ...(await state(env)), auto: !!(await env.CONFIG.get('code')) }; }
 async function state(env) { return (await env.CONFIG.get('done', 'json')) || { secrets: [] }; }
 async function mark(env, patch) { const s = { ...(await state(env)), ...patch }; await env.CONFIG.put('done', JSON.stringify(s)); return s; }
-async function loggedIn(env, req) {
-  if (!env.SETUP_PASSWORD) return false;
-  const c = /(?:^|;\s*)setup=([^;]+)/.exec(req.headers.get('cookie') || '');
-  return !!c && same(c[1], await hmac(env.SETUP_PASSWORD, 'setup'));
+async function sessionKey(env) {   // ログインのクッキーの鍵：合言葉（古い形）か、置き場の鍵（B の形）
+  if (env.SETUP_PASSWORD) return env.SETUP_PASSWORD;
+  let k = await env.CONFIG.get('session_key');
+  if (!k) { k = random(24); await env.CONFIG.put('session_key', k); }
+  return k;
 }
+async function loggedIn(env, req) {
+  const c = /(?:^|;\s*)setup=([^;]+)/.exec(req.headers.get('cookie') || '');
+  return !!c && same(c[1], await hmac(await sessionKey(env), 'setup'));
+}
+const loginCookie = async env => `setup=${await hmac(await sessionKey(env), 'setup')}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`;
 async function tell(env, event, extra = {}) {   // 担当者に進み具合を知らせる（失敗しても導入は止めない）
   const code = await env.CONFIG.get('code');
   if (!code || !env.ONBOARD_API) return;
@@ -48,7 +55,9 @@ async function tell(env, event, extra = {}) {   // 担当者に進み具合を�
 function view(s, origin, msg = '') {
   const card = (n, ok, title, body) => `<section class="card ${ok ? 'ok' : ''}"><h2><span class="n">${ok ? '✓' : n}</span>${title}${ok ? '<span class="tag">済み</span>' : ''}</h2>${body}</section>`;
   const has = k => (s.secrets || []).includes(k);
-  const gh = s.github ? `<p class="muted">${esc(s.repo)} につながっています</p>` : `<p>ボタンを押すと GitHub が開きます。「Create GitHub App」→ このリポジトリだけを選んで「Install」を押してください（1分）</p><form method="post" action="/setup/github"><button>GitHub につなぐ</button></form>`;
+  const gh = s.github ? `<p class="muted">${esc(s.repo)} につながっています${s.auto && s.draft ? '（仕組みの中身も入りました）' : ''}</p>` : s.auto
+    ? `<p>ボタンを押すと GitHub が開きます。GitHub のアカウントでログイン（なければ「Continue with Google」で作る）→ 本人確認でメールに届くコードを入れる →「Create GitHub App」→「Install」→「Authorize」の順に押してください。御社の GitHub に非公開のリポジトリができ、仕組みの中身が入ります（3分）</p><form method="post" action="/setup/github"><button>GitHub につなぐ</button></form>`
+    : `<p>ボタンを押すと GitHub が開きます。「Create GitHub App」→ このリポジトリだけを選んで「Install」を押してください（1分）</p><form method="post" action="/setup/github"><button>GitHub につなぐ</button></form>`;
   const draft = s.draft ? `<p class="muted">${esc(s.company || '')} の設定を取り込みました</p>` : `<p>担当者からお送りした「導入コード」を入れてください</p><form method="post" action="/setup/draft" class="row"><input name="code" required placeholder="例：2IhxierPpcuc" autocomplete="off"><button>取り込む</button></form>`;
   const google = s.google ? `<p class="muted">台帳（Google スプレッドシート）を作りました。<a href="https://docs.google.com/spreadsheets/d/${esc(s.sheet)}/edit" target="_blank" rel="noopener">開く</a></p>`
     : `<p>ボタンを押すとコードが出ます。Google の画面にそのコードを入れて「許可」を押してください。この仕組みが作るシートだけを使い、ほかのファイルは見ません（1分）</p><button id="g" type="button">Google で許可</button><div id="gout" class="muted"></div>`;
@@ -65,7 +74,7 @@ function view(s, origin, msg = '') {
     <button>入れる（入れた物だけ・あとから足せます）</button></form>`;
   const ready = s.github && s.draft;
   const finish = s.finished ? `<p class="muted">診断を流しました。結果は Discord に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form>`
-    : ready ? `<p>入れ終わったら押してください。会社の設定とレシピを入れ、正しく動くかを診断します（結果は Discord へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">1と2が済むと押せます</p>`;
+    : ready ? `<p>入れ終わったら押してください。会社の設定とレシピを入れ、正しく動くかを診断します（結果は Discord へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">${s.auto ? '1' : '1と2'}が済むと押せます</p>`;
   const script = s.google ? '' : `<script>
 document.getElementById('g').onclick=async()=>{const o=document.getElementById('gout');o.textContent='準備しています…';
 const r=await (await fetch('/setup/google/start',{method:'POST'})).json();if(r.error){o.innerHTML='<span class=err>'+r.error+'</span>';return}
@@ -73,10 +82,10 @@ o.innerHTML='<p>コード：<span class=code>'+r.user_code+'</span></p><p><a hre
 const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{method:'POST'})).json();if(p.status==='ok'){clearInterval(t);location.reload()}else if(p.status==='error'){clearInterval(t);o.innerHTML+='<p class=err>'+p.error+'</p>'}},(r.interval||5)*1000)}</script>`;
   return page('Orbit Package の設定', `<h1>Orbit Package の設定</h1><p class="muted">上から順に進めてください。終わった所には ✓ が付きます。鍵は暗号化して御社の GitHub に入り、担当者にも見えません</p>
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
-    ${card(1, s.github, 'GitHub につなぐ', gh)}${card(2, s.draft, '導入コード', draft)}${card(3, s.google, 'Google で許可', google)}
-    ${card(4, ['DISCORD_WEBHOOK_URL', 'BUFFER_API_KEY', 'MAIL_PASSWORD'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる', keys)}
-    ${card(5, s.finished, '仕上げ', finish)}
-    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>（この合言葉で入れます）</p>${script}`);
+    ${card(1, s.github, 'GitHub につなぐ', gh)}${s.auto ? '' : card(2, s.draft, '導入コード', draft)}${card(s.auto ? 2 : 3, s.google, 'Google で許可', google)}
+    ${card(s.auto ? 3 : 4, ['DISCORD_WEBHOOK_URL', 'BUFFER_API_KEY', 'MAIL_PASSWORD'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる', keys)}
+    ${card(s.auto ? 4 : 5, s.finished, '仕上げ', finish)}
+    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>（このページと同じログインで入れます）</p>${script}`);
 }
 
 const login = (msg = '') => page('合言葉', `<h1>合言葉を入れてください</h1><p class="muted">Deploy のときに決めた合言葉（SETUP_PASSWORD）です</p>${msg ? `<p class="err">${esc(msg)}</p>` : ''}
@@ -92,23 +101,38 @@ async function connectGithub(env, origin) {
   return page('GitHub へ', `<p>GitHub に移ります…</p><form id="f" method="post" action="https://github.com/settings/apps/new?state=${st}"><input type="hidden" name="manifest" value="${esc(JSON.stringify(m))}"><button>進まないときは押す</button></form><script>document.getElementById('f').submit()</script>`);
 }
 
-async function afterInstall(env, origin, gh) {
-  // このリポジトリ（仕組みの入った物）を探して覚え、承認のリンク用の鍵と受け口の URL を入れる
+async function afterInstall(env, origin, gh, code) {
+  // B の形：本人の許可の code があれば、リポジトリを作って（使い回して）つなぐ。なければ古い形（入れたリポジトリから探す）
+  if (code) {
+    const app = await env.CONFIG.get('app', 'json');
+    const repo = await ensureRepo(await userToken(app, code), await env.CONFIG.get('inst'), (await env.CONFIG.get('repo_name')) || 'orbit-package');
+    await env.CONFIG.put('repo', repo); await env.CONFIG.delete('tok');
+    if ((await call(await installationToken(env), 'GET', `/repos/${repo}`)).status !== 200)
+      return `⚠ アプリの手が ${repo} に届いていません。GitHub の「Settings」→「Applications」→ このアプリの「Configure」で「All repositories」か ${repo} を選んで「Save」を押してください（このページに戻ります）`;
+    return finishGithub(env, origin, gh, repo);
+  }
   const token = await installationToken(env);
   const list = await call(token, 'GET', '/installation/repositories?per_page=100');
   const repos = (list.json.repositories || []).map(r => r.full_name);
-  let repo = null;
-  for (const name of repos) {   // 仕組みのリポジトリ：入口（receiver/setup.js）か中身（cloud/lines/recipe.py）があるもの。1つだけならそれ（10/18 t3：入口の雛形には中身がないため）
+  const known = await env.CONFIG.get('repo'), want = (await env.CONFIG.get('repo_name')) || 'orbit-package';
+  let repo = repos.includes(known) ? known : (repos.find(n => n.split('/')[1] === want) || null);   // 作ったリポジトリを先に（全部のリポジトリに入れた会社で、ほかのリポジトリを選ばない）
+  for (const name of repo ? [] : repos) {   // 仕組みのリポジトリ：入口（receiver/setup.js）か中身（cloud/lines/recipe.py）があるもの。1つだけならそれ（10/18 t3：入口の雛形には中身がないため）
     for (const f of ['receiver/setup.js', 'cloud/lines/recipe.py']) if ((await call(token, 'GET', `/repos/${name}/contents/${f}`)).status === 200) { repo = name; break; }
     if (repo) break;
   }
   if (!repo && repos.length === 1) repo = repos[0];
   if (!repo) return `⚠ 仕組みの入ったリポジトリが見つかりません。GitHub の画面で、Deploy で作ったリポジトリを選んでください`;
   await env.CONFIG.put('repo', repo);
+  return finishGithub(env, origin, gh, repo);
+}
+
+async function finishGithub(env, origin, gh, repo) {
   let key = await env.CONFIG.get('approve_key');
   if (!key) { key = random(24); await env.CONFIG.put('approve_key', key); }
   await putSecret(gh, 'APPROVE_KEY', key); await putSecret(gh, 'RECEIVER_URL', origin);
   await mark(env, { github: true, repo, secrets: [...new Set([...(await state(env)).secrets, 'APPROVE_KEY', 'RECEIVER_URL'])] });
+  const code = await env.CONFIG.get('code');   // 受付が最初に入れた導入コード：中身と下書きをそのまま取り込む（B の形）
+  if (code && !(await state(env)).draft) return importDraft(env, gh, code);
   return '';
 }
 
@@ -240,7 +264,7 @@ async function instruct(req, env, gh) {
 export async function route(req, env) {
   const url = new URL(req.url), path = url.pathname, origin = url.origin;
   if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || (path === '/m' && req.method === 'POST'))) return null;
-  if (!env.CONFIG) return page('設定', '<h1>置き場（CONFIG）がありません</h1><p class="muted">Deploy to Cloudflare のボタンから置き直してください</p>');
+  if (!env.CONFIG) return page('設定', '<h1>置き場（CONFIG）がありません</h1><p class="muted">担当者からのリンクを開き、「Cloudflare で許可」をもう一度押してください</p>');
   const gh = repoApi(env);
   if (path === '/m') {   // 画像の置き場（Actions から。承認の鍵で確かめる）
     const key = await env.CONFIG.get('approve_key');
@@ -255,11 +279,16 @@ export async function route(req, env) {
   }
   const a = /^\/a\/(\d+)$/.exec(path);
   if (a) return approval(req, env, gh, Number(a[1]), url);
+  if (path === '/setup' && url.searchParams.get('login')) {   // 受付が作ったログインの印つきのリンク（B の形）
+    const t = await env.CONFIG.get('login_token');
+    if (!t || !same(url.searchParams.get('login'), t)) return login('このリンクは使えません。担当者からのリンクを開き直してください');
+    return go('/setup', await loginCookie(env));
+  }
   if (path === '/setup/login' && req.method === 'POST') {
     if (!env.SETUP_PASSWORD) return login('合言葉（SETUP_PASSWORD）がまだ決まっていません。Cloudflare の Worker の「設定」→「変数とシークレット」で入れてください');
     const f = await form(req);
     if (!same(await hmac(env.SETUP_PASSWORD, f.password || ''), await hmac(env.SETUP_PASSWORD, env.SETUP_PASSWORD))) return login('合言葉が違います');
-    return go('/setup', `setup=${await hmac(env.SETUP_PASSWORD, 'setup')}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=43200`);
+    return go('/setup', await loginCookie(env));
   }
   // GitHub から戻る道（ログインのクッキーは SameSite=Lax で付いてくる）
   if (!(await loggedIn(env, req))) return login();
@@ -269,16 +298,16 @@ export async function route(req, env) {
     if (path === '/setup/github' && req.method === 'POST') return connectGithub(env, origin);
     if (path === '/setup/github/back') {
       const st = await env.CONFIG.get('gh_state');
-      if (!st || st !== url.searchParams.get('state')) return view(await state(env), origin, '⚠ 時間が経ちすぎました。もう一度「GitHub につなぐ」を押してください');
+      if (!st || st !== url.searchParams.get('state')) return view(await viewState(env), origin, '⚠ 時間が経ちすぎました。もう一度「GitHub につなぐ」を押してください');
       const app = await convert(url.searchParams.get('code') || '');
       await env.CONFIG.put('app', JSON.stringify(app)); await env.CONFIG.delete('tok');
       return go(`https://github.com/apps/${app.slug}/installations/new`);
     }
     if (path === '/setup/github/installed') {
       const inst = url.searchParams.get('installation_id');
-      if (!/^\d+$/.test(inst || '')) return view(await state(env), origin, '⚠ GitHub から戻れませんでした。もう一度押してください');
+      if (!/^\d+$/.test(inst || '')) return view(await viewState(env), origin, '⚠ GitHub から戻れませんでした。もう一度押してください');
       await env.CONFIG.put('inst', inst); await env.CONFIG.delete('tok');
-      msg = await afterInstall(env, origin, gh);
+      msg = await afterInstall(env, origin, gh, url.searchParams.get('code'));
       if (!msg) await tell(env, 'github', { repo: await env.CONFIG.get('repo') });
     }
     if (path === '/setup/google/start' && req.method === 'POST') return Response.json(await googleStart(env));
@@ -287,5 +316,5 @@ export async function route(req, env) {
     if (path === '/setup/draft' && req.method === 'POST') msg = await importDraft(env, gh, (await form(req)).code || '');
     if (path === '/setup/finish' && req.method === 'POST') msg = await finish(env, gh, origin);
   } catch (e) { msg = `⚠ ${String(e.message || e).slice(0, 200)}`; }
-  return view(await state(env), origin, msg);
+  return view(await viewState(env), origin, msg);
 }

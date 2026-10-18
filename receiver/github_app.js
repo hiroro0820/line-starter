@@ -78,10 +78,11 @@ export function repoApi(env, fetcher = fetch) {
 export function manifest(origin, name) {
   return {
     name, url: origin, public: false,
+    request_oauth_on_install: true, callback_urls: [`${origin}/setup/github/installed`],   // 入れるときに本人の許可ももらう（個人のアカウントにリポジトリを作るため・B の形 10/18）
     hook_attributes: { url: `${origin}/gh-hook`, active: false },
     redirect_url: `${origin}/setup/github/back`,
-    setup_url: `${origin}/setup/github/installed`,
-    default_permissions: { actions: 'write', issues: 'write', contents: 'write', secrets: 'write', metadata: 'read', workflows: 'write' },   // workflows：中身の束にワークフローが入るため（このリポジトリだけ）
+    setup_url: `${origin}/setup/github/installed`, setup_on_update: true,   // 入れ先のリポジトリを選び直したら設定のページに戻る
+    default_permissions: { actions: 'write', issues: 'write', contents: 'write', secrets: 'write', metadata: 'read', workflows: 'write', administration: 'write' },   // administration：リポジトリを作る（本人の許可の鍵で1回だけ）   // workflows：中身の束にワークフローが入るため（このリポジトリだけ）
     default_events: [],
   };
 }
@@ -90,7 +91,7 @@ export async function convert(code, fetcher = fetch) {
   const r = await fetcher(`${API}/app-manifests/${encodeURIComponent(code)}/conversions`, { method: 'POST', headers: { accept: 'application/vnd.github+json', 'user-agent': 'line-receiver' } });
   if (r.status !== 201) throw new Error(`GitHub App を作れなかった（${r.status}）`);
   const j = await r.json();
-  return { id: j.id, slug: j.slug, pem: j.pem, owner: j.owner?.login || '' };
+  return { id: j.id, slug: j.slug, pem: j.pem, owner: j.owner?.login || '', client_id: j.client_id, client_secret: j.client_secret };
 }
 
 // 秘密の設定を1つ入れる（値は暗号化してから送る。GitHub も担当者も中身は読めない）
@@ -126,4 +127,27 @@ export async function commitFiles(gh, files, message, branch = 'main') {
   const upd = await gh('PATCH', `/git/refs/heads/${branch}`, { sha: commit.json.sha });
   if (upd.status !== 200) throw new Error(`反映できない（${upd.status}）`);
   return commit.json.sha;
+}
+
+// 本人の許可の鍵（入れるときにもらう code を交換。8時間で切れる。保存しない）
+export async function userToken(app, code, fetcher = fetch) {
+  const r = await fetcher('https://github.com/login/oauth/access_token', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'line-receiver' },
+    body: JSON.stringify({ client_id: app.client_id, client_secret: app.client_secret, code }) });
+  const j = await r.json().catch(() => ({}));
+  if (!j.access_token) throw new Error(`GitHub の許可を受け取れない（${j.error || r.status}）`);
+  return j.access_token;
+}
+
+// お客様の GitHub に非公開のリポジトリを作る（もうあれば使い回す）。アプリの入れ先が「選んだリポジトリだけ」なら、そこに足す
+export async function ensureRepo(userTok, installation, name = 'orbit-package', fetcher = fetch) {
+  const me = await call(userTok, 'GET', '/user', undefined, fetcher);
+  if (me.status !== 200) throw new Error(`GitHub のアカウントを読めない（${me.status}）`);
+  let repo = await call(userTok, 'GET', `/repos/${me.json.login}/${name}`, undefined, fetcher);
+  if (repo.status === 404) {
+    repo = await call(userTok, 'POST', '/user/repos', { name, private: true, auto_init: true, description: 'Orbit Package（御社の AI の仕組み）' }, fetcher);
+    if (repo.status !== 201) throw new Error(`リポジトリを作れない（${repo.status} ${repo.json.message || ''}）`);
+  } else if (repo.status !== 200) throw new Error(`リポジトリを読めない（${repo.status}）`);
+  const add = await call(userTok, 'PUT', `/user/installations/${installation}/repositories/${repo.json.id}`, undefined, fetcher);
+  // 204＝足せた・422＝全部のリポジトリに入れてある。403 は App の本人の鍵ではこの道を使えないとき（10/18 本物で確認）→ 止めずに、届くかは呼ぶ側が App の鍵で確かめる
+  return repo.json.full_name;
 }

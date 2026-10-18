@@ -1,4 +1,4 @@
-# 受け口（Cloudflare Workers）。Deploy to Cloudflare のボタンが読む。置き場（KV）は自動で作られる
+# 受け口（Cloudflare Workers）。B の形では受付が API で置く（この設定はまとめを作るときと、Deploy ボタンの形の名残で使う）
 name = "orbit-package"
 main = "receiver/worker.js"
 compatibility_date = "2026-10-01"

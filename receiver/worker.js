@@ -1,12 +1,12 @@
 // お客様の受け口（Cloudflare Workers・2026-10-17）。Discord のアプリの「Interactions Endpoint URL」にこの Worker の URL を入れる。
-// Deploy ボタンの形（10/18）：/setup の設定のページで GitHub App・鍵・Google をつなぐ（setup.js）。Discord はウェブフック＋承認のページ /a/<番号>。
+// B の形（10/18）：/setup の設定のページで GitHub App・鍵・Google をつなぐ（setup.js）。Discord はウェブフック＋承認のページ /a/<番号>。
 // 古い形の秘密の設定（Worker の secret）：DISCORD_PUBLIC_KEY（アプリの公開鍵）・APPROVERS（承認できる人の Discord の ID、カンマ区切り）・GH_TOKEN（このリポジトリだけの鍵：Actions と Issues の書き込み）・GH_REPO（組織/リポジトリ）
 // 置き方：リポジトリの .github/workflows/receiver.yml が自動で置く（お客様は Cloudflare の鍵をリポジトリに貼るだけ）。
 // 承認の状態＝Issue、途中の荷物＝GitHub の成果物。公開画像だけ KV（MEDIA）に置く。
 import { handle } from './handle.js';
 import { route } from './setup.js';
 import { repoApi } from './github_app.js';
-import SCHEDULE_FILE from './schedule.json' with { type: 'json' };   // レシピの定時の表（仕上げとレシピの変更のたびにリポジトリへ書き直す・Deploy ボタンの形）
+import SCHEDULE_FILE from './schedule.json' with { type: 'json' };   // レシピの定時の表（仕上げとレシピの変更のたびにリポジトリへ書き直す・B の形）
 
 const hex = h => Uint8Array.from(h.match(/.{2}/g) || [], b => parseInt(b, 16));
 
@@ -40,8 +40,24 @@ export function isDue(rule, now) {
     && (!rule.monthdays || rule.monthdays.includes(jst.getUTCDate()));
 }
 
+// 定時の表：Worker の設定（古い形）→ リポジトリの receiver/schedule.json（B の形・1時間ごとに読み直して置き場に控える）→ まとめたときの表
+export async function scheduleOf(env, gh, now = Date.now()) {
+  if (env.SCHEDULE) return JSON.parse(env.SCHEDULE);
+  if (env.CONFIG) {
+    const c = await env.CONFIG.get('schedule', 'json');
+    if (c && now - c.at < 3600 * 1000) return c.list;
+    const r = await gh('GET', '/contents/receiver/schedule.json');
+    if (r.status === 200 && r.json.content) {
+      const list = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(r.json.content.replace(/\s/g, '')), ch => ch.charCodeAt(0))));
+      await env.CONFIG.put('schedule', JSON.stringify({ at: now, list })); return list;
+    }
+    if (c) return c.list;
+  }
+  return SCHEDULE_FILE;
+}
+
 export async function dispatchDue(env, now, gh = repoApi(env)) {
-  const recipes = env.SCHEDULE ? JSON.parse(env.SCHEDULE) : SCHEDULE_FILE;
+  const recipes = await scheduleOf(env, gh, now.getTime());
   const ids = [...new Set(recipes.filter(r => isDue(r.rule, now)).map(r => r.id))];
   if (!ids.length) return;
   const r = await gh('POST', '/actions/workflows/recipes.yml/dispatches', { ref: 'main', inputs: { ids: ids.join(',') } });
@@ -54,6 +70,7 @@ export default {
   },
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
+    if (path === '/' && request.method === 'GET' && /text\/html/.test(request.headers.get('accept') || '')) return Response.redirect(new URL('/setup', request.url).toString(), 302);   // ブラウザで住所をそのまま開いたら設定のページへ（Discord の受け口・生存確認はそのまま・10/18 t3）
     const page = await route(request, env);
     if (page) return page;
     if (request.method === 'GET' && path.startsWith('/m/')) {
