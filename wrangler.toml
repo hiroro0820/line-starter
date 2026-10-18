@@ -1,0 +1,19 @@
+# 受け口（Cloudflare Workers）。Deploy to Cloudflare のボタンが読む。置き場（KV）は自動で作られる
+name = "ai-line"
+main = "receiver/worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[[kv_namespaces]]
+binding = "MEDIA"
+
+[[kv_namespaces]]
+binding = "CONFIG"
+
+[vars]
+ONBOARD_API = "https://sns-package.vercel.app/api/onboard"
+GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_SECRET = ""
