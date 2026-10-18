@@ -7,13 +7,12 @@ workers_dev = true
 [triggers]
 crons = ["*/30 * * * *"]
 
-[[kv_namespaces]]
-binding = "MEDIA"
-
+# 置き場は1つ（設定と画像）。番号は Deploy の画面が作った置き場の物に置き換わる（10/18 t3）
 [[kv_namespaces]]
 binding = "CONFIG"
+id = "orbit-package-config"
 
 [vars]
 ONBOARD_API = "https://orbit-package.com/api/onboard"
 GOOGLE_CLIENT_ID = "964060622908-3bu234gembpqbk6khked80k2sj5eikk9.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET = ""   # 導入コードを入れると入る
+GOOGLE_CLIENT_SECRET = "-"   # 合言葉は導入コードで、設定のページが置き場に入れる

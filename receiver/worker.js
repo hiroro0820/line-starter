@@ -59,8 +59,9 @@ export default {
     if (request.method === 'GET' && path.startsWith('/m/')) {
       let key;
       try { key = decodeURIComponent(path.slice(3)); } catch { return new Response('not found', { status: 404 }); }
-      if (!key || !env.MEDIA) return new Response('not found', { status: 404 });
-      const { value, metadata } = await env.MEDIA.getWithMetadata(key, 'arrayBuffer');
+      const kv = env.MEDIA || env.CONFIG;   // 置き場は1つでも2つでもよい（10/18 t3：Deploy の画面で名前がぶつかるため1つにまとめた）
+      if (!key || !kv) return new Response('not found', { status: 404 });
+      const { value, metadata } = await kv.getWithMetadata(key, 'arrayBuffer');
       if (value === null) return new Response('not found', { status: 404 });
       return new Response(value, { headers: { 'content-type': metadata?.contentType || 'application/octet-stream', 'x-content-type-options': 'nosniff' } });
     }

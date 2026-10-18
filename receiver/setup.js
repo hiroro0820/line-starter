@@ -109,9 +109,20 @@ async function afterInstall(env, origin, gh) {
 }
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+// Google の合言葉：導入コードの束で置き場（CONFIG）に入る。Worker の設定にあればそれ（仮の値「-」などの短い物は使わない・10/18 t3）
+async function googleSecret(env) {
+  let v = env.GOOGLE_CLIENT_SECRET && env.GOOGLE_CLIENT_SECRET.length > 10 ? env.GOOGLE_CLIENT_SECRET : await env.CONFIG.get('google_client_secret');
+  const code = await env.CONFIG.get('code');
+  if (!v && code && env.ONBOARD_API) {   // 古い設定のページで取り込んだ会社：受付から合言葉だけ受け取って置き場に入れる
+    const r = await fetch(`${env.ONBOARD_API}?t=${encodeURIComponent(code)}&google=1`);
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.google_client_secret) { v = j.google_client_secret; await env.CONFIG.put('google_client_secret', v); }
+  }
+  return v || '';
+}
 async function googleStart(env) {
   if (!env.GOOGLE_CLIENT_ID) return { error: 'Google の設定（GOOGLE_CLIENT_ID）がまだありません。担当者にお知らせください' };
-  if (!env.GOOGLE_CLIENT_SECRET) return { error: '先に「導入コード」を入れてください。入れたあと2〜3分で使えるようになります' };   // 合言葉は導入コードの束で入る
+  if (!(await googleSecret(env))) return { error: '先に「導入コード」を入れてください' };   // 合言葉は導入コードの束で入る
   const r = await fetch('https://oauth2.googleapis.com/device/code', { method: 'POST', body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, scope: GOOGLE_SCOPE }) });
   const j = await r.json();
   if (!r.ok) return { error: `Google の準備に失敗しました（${j.error || r.status}）` };
@@ -121,7 +132,7 @@ async function googleStart(env) {
 async function googlePoll(env, gh) {
   const dev = await env.CONFIG.get('gdev');
   if (!dev) return { status: 'error', error: '時間切れです。もう一度「Google で許可」を押してください' };
-  const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET || '', device_code: dev, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }) });
+  const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: await googleSecret(env), device_code: dev, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }) });
   const j = await r.json();
   if (j.error === 'authorization_pending' || j.error === 'slow_down') return { status: 'wait' };
   if (!r.ok || !j.refresh_token) return { status: 'error', error: `許可を受け取れませんでした（${j.error || r.status}）` };
@@ -131,7 +142,7 @@ async function googlePoll(env, gh) {
     body: JSON.stringify({ properties: { title: 'Orbit Package の台帳', locale: 'ja_JP', timeZone: 'Asia/Tokyo' }, sheets: [{ properties: { title: '作業台DB' }, data: [{ startRow: 0, startColumn: 0, rowData: [{ values: head }] }] }] }) });
   const sj = await s.json();
   if (!s.ok) return { status: 'error', error: `台帳を作れませんでした（${sj.error?.status || s.status}）` };
-  await putSecret(gh, 'GOOGLE_OAUTH_JSON', JSON.stringify({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET || '', refresh_token: j.refresh_token, token_uri: 'https://oauth2.googleapis.com/token' }));
+  await putSecret(gh, 'GOOGLE_OAUTH_JSON', JSON.stringify({ client_id: env.GOOGLE_CLIENT_ID, client_secret: await googleSecret(env), refresh_token: j.refresh_token, token_uri: 'https://oauth2.googleapis.com/token' }));
   await putSecret(gh, 'WORKBENCH_SHEET', sj.spreadsheetId);
   const st = await state(env);
   await mark(env, { google: true, sheet: sj.spreadsheetId, secrets: [...new Set([...st.secrets, 'GOOGLE_OAUTH_JSON', 'WORKBENCH_SHEET'])] });
@@ -171,6 +182,7 @@ async function importDraft(env, gh, code) {
   const b = await fetch(`${env.ONBOARD_API}?t=${encodeURIComponent(code)}&bundle=1`);
   const bj = await b.json().catch(() => ({}));
   if (!b.ok || !bj.files) return `⚠ ${bj.error || '仕組みの中身を受け取れませんでした。担当者にお知らせください'}`;
+  if (bj.google_client_secret) await env.CONFIG.put('google_client_secret', bj.google_client_secret);   // Google の合言葉（設定ファイルは上書きしない）
   const files = { ...bj.files, 'cloud/lines/draft.json': { mode: '100644', content: JSON.stringify(j.setup, null, 1) + '\n' } };
   await commitFiles(gh, files, `仕組みの中身（${bj.version || ''}）と担当者の下書きを取り込む`);
   await env.CONFIG.put('code', code);
@@ -228,12 +240,13 @@ export async function route(req, env) {
   const gh = repoApi(env);
   if (path === '/m') {   // 画像の置き場（Actions から。承認の鍵で確かめる）
     const key = await env.CONFIG.get('approve_key');
-    if (!key || !same(req.headers.get('authorization') || '', `Bearer ${key}`) || !env.MEDIA) return new Response('forbidden', { status: 403 });
+    const kv = env.MEDIA || env.CONFIG;
+    if (!key || !same(req.headers.get('authorization') || '', `Bearer ${key}`) || !kv) return new Response('forbidden', { status: 403 });
     const type = req.headers.get('content-type') || '';
     const ext = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' }[type];
     if (!ext) return new Response('PNG・JPEG・WebP だけ', { status: 415 });
     const name = random(16).toLowerCase().replace(/[^a-z0-9]/g, '0') + ext;
-    await env.MEDIA.put(name, await req.arrayBuffer(), { metadata: { contentType: type } });
+    await kv.put(name, await req.arrayBuffer(), { metadata: { contentType: type } });
     return Response.json({ url: `${origin}/m/${name}` });
   }
   const a = /^\/a\/(\d+)$/.exec(path);
