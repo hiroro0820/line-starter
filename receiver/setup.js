@@ -88,7 +88,7 @@ async function form(req) { return Object.fromEntries([...(await req.formData()).
 async function connectGithub(env, origin) {
   const st = random(12); await env.CONFIG.put('gh_state', st, { expirationTtl: 1800 });
   const host = new URL(origin).hostname.split('.')[0].slice(0, 20);
-  const m = manifest(origin, `orbit-${host}-${random(3).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`.slice(0, 34));
+  const m = manifest(origin, `${host.startsWith('orbit') ? '' : 'orbit-'}${host}-${random(3).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`.slice(0, 34));   // orbit-orbit- と二重にしない
   return page('GitHub へ', `<p>GitHub に移ります…</p><form id="f" method="post" action="https://github.com/settings/apps/new?state=${st}"><input type="hidden" name="manifest" value="${esc(JSON.stringify(m))}"><button>進まないときは押す</button></form><script>document.getElementById('f').submit()</script>`);
 }
 
@@ -98,7 +98,11 @@ async function afterInstall(env, origin, gh) {
   const list = await call(token, 'GET', '/installation/repositories?per_page=100');
   const repos = (list.json.repositories || []).map(r => r.full_name);
   let repo = null;
-  for (const name of repos) { if ((await call(token, 'GET', `/repos/${name}/contents/cloud/lines/recipe.py`)).status === 200) { repo = name; break; } }
+  for (const name of repos) {   // 仕組みのリポジトリ：入口（receiver/setup.js）か中身（cloud/lines/recipe.py）があるもの。1つだけならそれ（10/18 t3：入口の雛形には中身がないため）
+    for (const f of ['receiver/setup.js', 'cloud/lines/recipe.py']) if ((await call(token, 'GET', `/repos/${name}/contents/${f}`)).status === 200) { repo = name; break; }
+    if (repo) break;
+  }
+  if (!repo && repos.length === 1) repo = repos[0];
   if (!repo) return `⚠ 仕組みの入ったリポジトリが見つかりません。GitHub の画面で、Deploy で作ったリポジトリを選んでください`;
   await env.CONFIG.put('repo', repo);
   let key = await env.CONFIG.get('approve_key');
