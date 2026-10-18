@@ -14,6 +14,6 @@ binding = "MEDIA"
 binding = "CONFIG"
 
 [vars]
-ONBOARD_API = "https://orbit-package.vercel.app/api/onboard"
+ONBOARD_API = "https://orbit-package.com/api/onboard"
 GOOGLE_CLIENT_ID = ""
 GOOGLE_CLIENT_SECRET = ""
