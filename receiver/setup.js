@@ -4,7 +4,7 @@
 //   5. 仕上げ（会社の設定とレシピを入れ、診断を流す）
 // 承認のページ /a/<Issue>?s=<署名>（Discord の知らせのリンクから）と、指示のページ /i も、ここで受ける。
 // 入口は合言葉（Deploy のときにお客様が決めた SETUP_PASSWORD）。鍵の値は画面にも記録にも二度と出さない。
-import { repoApi, manifest, convert, putSecret, putFile, installationToken, call } from './github_app.js';
+import { repoApi, manifest, convert, putSecret, commitFiles, installationToken, call } from './github_app.js';
 
 const enc = new TextEncoder();
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -71,7 +71,7 @@ document.getElementById('g').onclick=async()=>{const o=document.getElementById('
 const r=await (await fetch('/setup/google/start',{method:'POST'})).json();if(r.error){o.innerHTML='<span class=err>'+r.error+'</span>';return}
 o.innerHTML='<p>コード：<span class=code>'+r.user_code+'</span></p><p><a href="'+r.verification_url+'" target="_blank" rel="noopener">Google の画面を開く</a> → コードを入れて「許可」</p><p>待っています…</p>';
 const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{method:'POST'})).json();if(p.status==='ok'){clearInterval(t);location.reload()}else if(p.status==='error'){clearInterval(t);o.innerHTML+='<p class=err>'+p.error+'</p>'}},(r.interval||5)*1000)}</script>`;
-  return page('AI の仕組みの設定', `<h1>AI の仕組みの設定</h1><p class="muted">上から順に進めてください。終わった所には ✓ が付きます。鍵は暗号化して御社の GitHub に入り、担当者にも見えません</p>
+  return page('Orbit Package の設定', `<h1>Orbit Package の設定</h1><p class="muted">上から順に進めてください。終わった所には ✓ が付きます。鍵は暗号化して御社の GitHub に入り、担当者にも見えません</p>
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
     ${card(1, s.github, 'GitHub につなぐ', gh)}${card(2, s.draft, '導入コード', draft)}${card(3, s.google, 'Google で許可', google)}
     ${card(4, ['DISCORD_WEBHOOK_URL', 'BUFFER_API_KEY', 'MAIL_PASSWORD'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる', keys)}
@@ -88,7 +88,7 @@ async function form(req) { return Object.fromEntries([...(await req.formData()).
 async function connectGithub(env, origin) {
   const st = random(12); await env.CONFIG.put('gh_state', st, { expirationTtl: 1800 });
   const host = new URL(origin).hostname.split('.')[0].slice(0, 20);
-  const m = manifest(origin, `ai-${host}-${random(3).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`.slice(0, 34));
+  const m = manifest(origin, `orbit-${host}-${random(3).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`.slice(0, 34));
   return page('GitHub へ', `<p>GitHub に移ります…</p><form id="f" method="post" action="https://github.com/settings/apps/new?state=${st}"><input type="hidden" name="manifest" value="${esc(JSON.stringify(m))}"><button>進まないときは押す</button></form><script>document.getElementById('f').submit()</script>`);
 }
 
@@ -127,7 +127,7 @@ async function googlePoll(env, gh) {
   await env.CONFIG.delete('gdev');
   const head = ['種類', 'ID', '中身', '更新'].map(v => ({ userEnteredValue: { stringValue: v } }));
   const s = await fetch('https://sheets.googleapis.com/v4/spreadsheets', { method: 'POST', headers: { authorization: `Bearer ${j.access_token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ properties: { title: 'AI の仕組みの台帳', locale: 'ja_JP', timeZone: 'Asia/Tokyo' }, sheets: [{ properties: { title: '作業台DB' }, data: [{ startRow: 0, startColumn: 0, rowData: [{ values: head }] }] }] }) });
+    body: JSON.stringify({ properties: { title: 'Orbit Package の台帳', locale: 'ja_JP', timeZone: 'Asia/Tokyo' }, sheets: [{ properties: { title: '作業台DB' }, data: [{ startRow: 0, startColumn: 0, rowData: [{ values: head }] }] }] }) });
   const sj = await s.json();
   if (!s.ok) return { status: 'error', error: `台帳を作れませんでした（${sj.error?.status || s.status}）` };
   await putSecret(gh, 'GOOGLE_OAUTH_JSON', JSON.stringify({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET || '', refresh_token: j.refresh_token, token_uri: 'https://oauth2.googleapis.com/token' }));
@@ -143,7 +143,7 @@ async function saveSecrets(env, gh, f) {
   if (f.DISCORD_WEBHOOK_URL) {
     if (!/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/.test(f.DISCORD_WEBHOOK_URL)) bad.push('Discord のウェブフック URL の形が違います');
     else {
-      const r = await fetch(f.DISCORD_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '✅ AI の仕組みとつながりました。知らせと承認はこのチャンネルに届きます' }) });
+      const r = await fetch(f.DISCORD_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '✅ Orbit Package とつながりました。知らせと承認はこのチャンネルに届きます' }) });
       if (r.status === 204 || r.status === 200) await put('DISCORD_WEBHOOK_URL', f.DISCORD_WEBHOOK_URL); else bad.push(`Discord に送れませんでした（${r.status}）。URL を確かめてください`);
     }
   }
@@ -166,7 +166,12 @@ async function importDraft(env, gh, code) {
   const r = await fetch(`${env.ONBOARD_API}?t=${encodeURIComponent(code)}&draft=1`);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.setup) return `⚠ ${j.error || '下書きがまだありません。担当者にお知らせください'}`;
-  await putFile(gh, 'cloud/lines/draft.json', JSON.stringify(j.setup, null, 1) + '\n', '担当者の下書きを取り込む');
+  // 仕組みの中身（承認したお客様にだけ受付が渡す）と下書きを、1回のコミットで入れる
+  const b = await fetch(`${env.ONBOARD_API}?t=${encodeURIComponent(code)}&bundle=1`);
+  const bj = await b.json().catch(() => ({}));
+  if (!b.ok || !bj.files) return `⚠ ${bj.error || '仕組みの中身を受け取れませんでした。担当者にお知らせください'}`;
+  const files = { ...bj.files, 'cloud/lines/draft.json': { mode: '100644', content: JSON.stringify(j.setup, null, 1) + '\n' } };
+  await commitFiles(gh, files, `仕組みの中身（${bj.version || ''}）と担当者の下書きを取り込む`);
   await env.CONFIG.put('code', code);
   await mark(env, { draft: true, company: j.name || '' });
   return '';

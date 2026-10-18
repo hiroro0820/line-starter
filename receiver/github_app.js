@@ -81,7 +81,7 @@ export function manifest(origin, name) {
     hook_attributes: { url: `${origin}/gh-hook`, active: false },
     redirect_url: `${origin}/setup/github/back`,
     setup_url: `${origin}/setup/github/installed`,
-    default_permissions: { actions: 'write', issues: 'write', contents: 'write', secrets: 'write', metadata: 'read' },
+    default_permissions: { actions: 'write', issues: 'write', contents: 'write', secrets: 'write', metadata: 'read', workflows: 'write' },   // workflows：中身の束にワークフローが入るため（このリポジトリだけ）
     default_events: [],
   };
 }
@@ -108,4 +108,22 @@ export async function putFile(gh, path, text, message) {
   const cur = await gh('GET', `/contents/${path}`);
   const r = await gh('PUT', `/contents/${path}`, { message, content: b64(enc.encode(text)), ...(cur.status === 200 ? { sha: cur.json.sha } : {}) });
   if (r.status !== 200 && r.status !== 201) throw new Error(`${path} を書けなかった（${r.status}）`);
+}
+
+// たくさんのファイルを1回のコミットで書く（中身の束の取り込み）。呼び出しは5回だけ（Cloudflare の1回あたりの上限に収める）
+// files：{ パス: { mode: '100644' | '100755', content: 文 } }
+export async function commitFiles(gh, files, message, branch = 'main') {
+  const ref = await gh('GET', `/git/ref/heads/${branch}`);
+  if (ref.status !== 200) throw new Error(`今の版を読めない（${ref.status}）`);
+  const parent = ref.json.object.sha;
+  const cur = await gh('GET', `/git/commits/${parent}`);
+  if (cur.status !== 200) throw new Error(`今の版を読めない（${cur.status}）`);
+  const tree = await gh('POST', '/git/trees', { base_tree: cur.json.tree.sha,
+    tree: Object.entries(files).map(([path, f]) => ({ path, mode: f.mode === '100755' ? '100755' : '100644', type: 'blob', content: f.content })) });
+  if (tree.status !== 201) throw new Error(`中身を書けない（${tree.status}）`);
+  const commit = await gh('POST', '/git/commits', { message, tree: tree.json.sha, parents: [parent] });
+  if (commit.status !== 201) throw new Error(`記録できない（${commit.status}）`);
+  const upd = await gh('PATCH', `/git/refs/heads/${branch}`, { sha: commit.json.sha });
+  if (upd.status !== 200) throw new Error(`反映できない（${upd.status}）`);
+  return commit.json.sha;
 }
