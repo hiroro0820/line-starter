@@ -88,7 +88,7 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
     <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>（このページと同じログインで入れます）</p>${script}`);
 }
 
-const login = (msg = '') => page('合言葉', `<h1>合言葉を入れてください</h1><p class="muted">Deploy のときに決めた合言葉（SETUP_PASSWORD）です</p>${msg ? `<p class="err">${esc(msg)}</p>` : ''}
+const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}<p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
   <form method="post" action="/setup/login" style="display:grid;gap:10px"><input name="password" type="password" required autofocus><button>入る</button></form>`);
 
 async function form(req) { return Object.fromEntries([...(await req.formData()).entries()].map(([k, v]) => [k, String(v).trim()])); }
@@ -279,9 +279,11 @@ export async function route(req, env) {
   }
   const a = /^\/a\/(\d+)$/.exec(path);
   if (a) return approval(req, env, gh, Number(a[1]), url);
-  if (path === '/setup' && url.searchParams.get('login')) {   // 受付が作ったログインの印つきのリンク（B の形）
+  if (path === '/setup' && url.searchParams.get('login')) {   // 受付が作ったログインの印つきのリンク（B の形）。1回使ったら消す（10/19：期限なしで使い回せた）。入り直しは「Cloudflare で許可」をもう一度押すと新しい印が入る
+    if (await loggedIn(env, req)) return go('/setup');   // もう入っている（「進まないときは押す」を2回押したときなど）
     const t = await env.CONFIG.get('login_token');
-    if (!t || !same(url.searchParams.get('login'), t)) return login('このリンクは使えません。担当者からのリンクを開き直してください');
+    if (!t || !same(url.searchParams.get('login'), t)) return login('このリンクはもう使われたか、使えません');
+    await env.CONFIG.delete('login_token');
     return go('/setup', await loginCookie(env));
   }
   if (path === '/setup/login' && req.method === 'POST') {
