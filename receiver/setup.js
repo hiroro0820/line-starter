@@ -4,6 +4,7 @@
 //   5. 仕上げ（会社の設定とレシピを入れ、診断を流す）
 // 承認のページ /a/<Issue>?s=<署名>（Discord の知らせのリンクから）と、指示のページ /i も、ここで受ける。
 // 入口は合言葉（Deploy のときにお客様が決めた SETUP_PASSWORD）。鍵の値は画面にも記録にも二度と出さない。
+import { shelfRoute } from './shelf.js';
 import { repoApi, manifest, convert, putSecret, commitFiles, installationToken, call, userToken, ensureRepo } from './github_app.js';
 
 const enc = new TextEncoder();
@@ -90,7 +91,7 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
     ${card(1, s.github, 'GitHub につなぐ', gh)}${s.auto ? '' : card(2, s.draft, '導入コード', draft)}${card(s.auto ? 2 : 3, s.google, 'Google で許可', google)}
     ${card(s.auto ? 3 : 4, [slack ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる（知らせの先と Claude は必須・Buffer とメールは使う会社だけ）', keys)}
     ${card(s.auto ? 4 : 5, s.finished, '仕上げ', finish)}
-    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>（このページと同じログインで入れます）</p>${script}`);
+    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・棚（部品とレシピを見る・組む・育てる）：<a href="${origin}/shelf">${origin}/shelf</a>（どちらもこのページと同じログインで入れます）</p>${script}`);
 }
 
 const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}<p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
@@ -226,6 +227,9 @@ async function importDraft(env, gh, code) {
   const files = { ...bj.files, 'cloud/lines/draft.json': { mode: '100644', content: JSON.stringify(j.setup, null, 1) + '\n' } };
   await commitFiles(gh, files, `仕組みの中身（${bj.version || ''}）と担当者の下書きを取り込む`);
   await env.CONFIG.put('code', code);
+  let sharing = false;   // 毎晩の共有（share.yml）が大元へ申し出るための印。失敗しても導入は止めない（共有だけ使えない）
+  try { await putSecret(gh, 'ONBOARD_CODE', code); sharing = true; } catch { }
+  if (sharing) { const st0 = await state(env); await mark(env, { secrets: [...new Set([...st0.secrets, 'ONBOARD_CODE'])] }); }
   await mark(env, { draft: true, company: j.name || '', notify: (j.setup && j.setup.notify && j.setup.notify.kind) || 'discord_webhook' });   // 通知先の種類（slack / discord_webhook など）を控える。設定のページの欄と済みの判定を合わせる（10/19・t4 で見つけた）
   return '';
 }
@@ -307,6 +311,7 @@ export async function route(req, env) {
   // GitHub から戻る道（ログインのクッキーは SameSite=Lax で付いてくる）
   if (!(await loggedIn(env, req))) return login();
   if (path === '/i') return instruct(req, env, gh);
+  if (path === '/shelf' || path.startsWith('/shelf/')) { const r = await shelfRoute(req, env, gh, url); if (r) return r; }   // 棚の画面（部品とレシピを見る・組む・育てる・10/19）
   let msg = '';
   try {
     if (path === '/setup/github' && req.method === 'POST') return connectGithub(env, origin);
