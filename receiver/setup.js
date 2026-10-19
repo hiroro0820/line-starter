@@ -62,9 +62,14 @@ function view(s, origin, msg = '') {
   const google = s.google ? `<p class="muted">台帳（Google スプレッドシート）を作りました。<a href="https://docs.google.com/spreadsheets/d/${esc(s.sheet)}/edit" target="_blank" rel="noopener">開く</a></p>`
     : `<p>ボタンを押すとコードが出ます。Google の画面にそのコードを入れて「許可」を押してください。この仕組みが作るシートだけを使い、ほかのファイルは見ません（1分）</p><button id="g" type="button">Google で許可</button><div id="gout" class="muted"></div>`;
   const field = (name, label, hint, type = 'text') => has(name) ? `<p class="muted">${label}：入っています（変えるときだけ入れ直す）</p><label>${label}<input name="${name}" type="${type}" autocomplete="off"></label>` : `<label>${label}<input name="${name}" type="${type}" autocomplete="off" placeholder="${esc(hint)}"></label>`;
+  const slack = s.notify === 'slack';
+  const hook = slack
+    ? `<details><summary>Slack の Incoming Webhook の出し方（3分）</summary><ol><li>https://api.slack.com/apps を開き「Create New App」→「From scratch」（名前は「Orbit Package」、ワークスペースは御社のもの）</li><li>左の「Incoming Webhooks」を On にし、「Add New Webhook to Workspace」で知らせを受けるチャンネルを選ぶ</li><li>出た「Webhook URL」をコピーして、下に貼る</li></ol></details>
+    ${field('SLACK_WEBHOOK_URL', 'Slack の Webhook URL', 'https://hooks.slack.com/services/…', 'url')}`
+    : `<details><summary>Discord のウェブフック URL の出し方（3分）</summary><ol><li>Discord で御社のサーバーを作る（あれば使う）</li><li>知らせを受けるチャンネルの ⚙（チャンネルの編集）→「連携サービス」→「ウェブフック」→「新しいウェブフック」</li><li>「ウェブフック URL をコピー」して、下に貼る</li></ol></details>
+    ${field('DISCORD_WEBHOOK_URL', 'Discord のウェブフック URL', 'https://discord.com/api/webhooks/…', 'url')}`;
   const keys = `<form method="post" action="/setup/secrets" style="display:grid;gap:12px">
-    <details><summary>Discord のウェブフック URL の出し方（3分）</summary><ol><li>Discord で御社のサーバーを作る（あれば使う）</li><li>知らせを受けるチャンネルの ⚙（チャンネルの編集）→「連携サービス」→「ウェブフック」→「新しいウェブフック」</li><li>「ウェブフック URL をコピー」して、下に貼る</li></ol></details>
-    ${field('DISCORD_WEBHOOK_URL', 'Discord のウェブフック URL', 'https://discord.com/api/webhooks/…', 'url')}
+    ${hook}
     <details><summary>Buffer の鍵の出し方（SNS をつなぐ・8分）</summary><ol><li>https://buffer.com に Google でログインし、発信する SNS（Instagram はプロアカウント・Threads・X）を「チャンネル」としてつなぐ</li><li>「Settings」→「API」で鍵を作り、下に貼る</li></ol></details>
     ${field('BUFFER_API_KEY', 'Buffer の鍵', '')}
     <details><summary>メールの「アプリ パスワード」の出し方（3分）</summary><ol><li>https://myaccount.google.com/apppasswords を開く（2段階認証が要ります）</li><li>名前に「AI の係」と入れて作成 → 出た16文字を下に貼る</li></ol></details>
@@ -73,8 +78,8 @@ function view(s, origin, msg = '') {
     ${field('CLAUDE_KEY', 'Claude の鍵（sk-ant- で始まる）', 'sk-ant-…', 'password')}
     <button>入れる（入れた物だけ・あとから足せます）</button></form>`;
   const ready = s.github && s.draft;
-  const finish = s.finished ? `<p class="muted">診断を流しました。結果は Discord に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form>`
-    : ready ? `<p>入れ終わったら押してください。会社の設定とレシピを入れ、正しく動くかを診断します（結果は Discord へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">${s.auto ? '1' : '1と2'}が済むと押せます</p>`;
+  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${slack ? 'Slack' : 'Discord'} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form>`
+    : ready ? `<p>入れ終わったら押してください。会社の設定とレシピを入れ、正しく動くかを診断します（結果は ${slack ? 'Slack' : 'Discord'} へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">${s.auto ? '1' : '1と2'}が済むと押せます</p>`;
   const script = s.google ? '' : `<script>
 document.getElementById('g').onclick=async()=>{const o=document.getElementById('gout');o.textContent='準備しています…';
 const r=await (await fetch('/setup/google/start',{method:'POST'})).json();if(r.error){o.innerHTML='<span class=err>'+r.error+'</span>';return}
@@ -83,7 +88,7 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
   return page('Orbit Package の設定', `<h1>Orbit Package の設定</h1><p class="muted">上から順に進めてください。終わった所には ✓ が付きます。鍵は暗号化して御社の GitHub に入り、担当者にも見えません</p>
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
     ${card(1, s.github, 'GitHub につなぐ', gh)}${s.auto ? '' : card(2, s.draft, '導入コード', draft)}${card(s.auto ? 2 : 3, s.google, 'Google で許可', google)}
-    ${card(s.auto ? 3 : 4, ['DISCORD_WEBHOOK_URL', 'BUFFER_API_KEY', 'MAIL_PASSWORD'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる', keys)}
+    ${card(s.auto ? 3 : 4, [slack ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる（知らせの先と Claude は必須・Buffer とメールは使う会社だけ）', keys)}
     ${card(s.auto ? 4 : 5, s.finished, '仕上げ', finish)}
     <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>（このページと同じログインで入れます）</p>${script}`);
 }
@@ -187,6 +192,13 @@ async function saveSecrets(env, gh, f) {
       if (r.status === 204 || r.status === 200) await put('DISCORD_WEBHOOK_URL', f.DISCORD_WEBHOOK_URL); else bad.push(`Discord に送れませんでした（${r.status}）。URL を確かめてください`);
     }
   }
+  if (f.SLACK_WEBHOOK_URL) {
+    if (!/^https:\/\/hooks\.slack\.com\/services\/[\w-]+\/[\w-]+\/[\w-]+$/.test(f.SLACK_WEBHOOK_URL)) bad.push('Slack の Webhook URL の形が違います（https://hooks.slack.com/services/… で始まります）');
+    else {
+      const r = await fetch(f.SLACK_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '✅ Orbit Package とつながりました。知らせと承認のリンクはこのチャンネルに届きます' }) });
+      if (r.status === 200) await put('SLACK_WEBHOOK_URL', f.SLACK_WEBHOOK_URL); else bad.push(`Slack に送れませんでした（${r.status}）。URL を確かめてください`);
+    }
+  }
   if (f.BUFFER_API_KEY) await put('BUFFER_API_KEY', f.BUFFER_API_KEY);
   if (f.MAIL_USER) await put('MAIL_USER', f.MAIL_USER);
   if (f.MAIL_PASSWORD) await put('MAIL_PASSWORD', f.MAIL_PASSWORD.replace(/\s+/g, ''));
@@ -214,7 +226,7 @@ async function importDraft(env, gh, code) {
   const files = { ...bj.files, 'cloud/lines/draft.json': { mode: '100644', content: JSON.stringify(j.setup, null, 1) + '\n' } };
   await commitFiles(gh, files, `仕組みの中身（${bj.version || ''}）と担当者の下書きを取り込む`);
   await env.CONFIG.put('code', code);
-  await mark(env, { draft: true, company: j.name || '' });
+  await mark(env, { draft: true, company: j.name || '', notify: (j.setup && j.setup.notify && j.setup.notify.kind) || 'discord_webhook' });   // 通知先の種類（slack / discord_webhook など）を控える。設定のページの欄と済みの判定を合わせる（10/19・t4 で見つけた）
   return '';
 }
 
@@ -223,7 +235,7 @@ async function finish(env, gh, origin) {
   if (r.status !== 204) return `⚠ 仕上げを始められませんでした（${r.status}）。少しして、もう一度押してください`;
   const st = await mark(env, { finished: true });
   await tell(env, 'setup', { repo: st.repo, url: origin, secrets: st.secrets, google: !!st.google });
-  return '仕上げを始めました（数分）。結果は Discord に届きます';
+  return '仕上げを始めました（数分）。結果は知らせの先（Slack か Discord）に届きます';
 }
 
 // ── 承認のページ（Discord の知らせのリンクから）
