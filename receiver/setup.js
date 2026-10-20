@@ -26,7 +26,9 @@ main{max-width:640px;margin:0 auto;padding:24px 16px 56px;display:grid;gap:14px}
 .ok .n{background:var(--good);color:#fff}.tag{font-size:.75rem;color:var(--good);font-weight:700}
 input,textarea{width:100%;font:inherit;font-size:16px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg);color:var(--fg)}
 label{display:grid;gap:4px;font-size:.9rem}button{font:inherit;font-weight:700;border:0;border-radius:10px;padding:12px 16px;background:var(--good);color:#fff;cursor:pointer;min-height:44px}
-button.sub{background:var(--chip);color:var(--fg)}.row{display:flex;gap:8px;flex-wrap:wrap}.err{color:var(--bad)}.code{font-size:1.6rem;font-weight:700;letter-spacing:.1em}
+button.sub,.btn.sub{background:var(--chip);color:var(--fg)}.btn{display:inline-flex;align-items:center;font-weight:700;border-radius:10px;padding:12px 16px;background:var(--good);color:#fff;text-decoration:none;min-height:44px}.moves{justify-content:space-between;align-items:center}.pass{color:var(--good);font-weight:700}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:4px;font-size:.9rem}.steps li{display:flex}.steps a,.steps li>span:first-child{color:var(--muted);text-decoration:none;display:flex;gap:8px;align-items:center}.steps li>span:first-child{width:22px}.steps span{width:22px;height:22px;border-radius:50%;background:var(--chip);display:grid;place-items:center;font-size:.75rem;flex:none}.steps .done span{background:var(--good);color:#fff}.steps .cur a{color:var(--fg);font-weight:700}.steps .cur span{outline:2px solid var(--good)}.steps small{color:var(--muted);font-weight:400}
+.progress{position:sticky;bottom:0;background:var(--bg);padding:10px 0 4px;border-top:1px solid var(--line)}.ptext{font-size:.85rem;color:var(--muted);margin-bottom:6px}.track{height:10px;border-radius:999px;background:var(--chip);overflow:hidden}.fill{height:100%;background:var(--good);border-radius:999px;transition:width .3s}.row{display:flex;gap:8px;flex-wrap:wrap}.err{color:var(--bad)}.code{font-size:1.6rem;font-weight:700;letter-spacing:.1em}
 ol{margin:0;padding-left:1.2em}pre{white-space:pre-wrap;background:var(--chip);border-radius:8px;padding:10px;margin:0;font:inherit;font-size:.9rem;max-height:420px;overflow:auto}a{color:var(--good)}`;
 const page = (title, body) => new Response(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head><body><main>${body}</main></body></html>`,
   { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' } });
@@ -52,9 +54,8 @@ async function tell(env, event, extra = {}) {   // 担当者に進み具合を�
   try { await fetch(env.ONBOARD_API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ t: code, event, ...extra }) }); } catch { }
 }
 
-// ── 設定のページ
-function view(s, origin, msg = '') {
-  const card = (n, ok, title, body) => `<section class="card ${ok ? 'ok' : ''}"><h2><span class="n">${ok ? '✓' : n}</span>${title}${ok ? '<span class="tag">済み</span>' : ''}</h2>${body}</section>`;
+// ── 設定のページ（10/20 オーナー：全部を1枚に並べず、1つずつ進む形に。上に手順の順番、真ん中に今の手順と確かめ、下に進み具合のバー）
+function view(s, origin, msg = '', want = '') {
   const has = k => (s.secrets || []).includes(k);
   const gh = s.github ? `<p class="muted">${esc(s.repo)} につながっています${s.auto && s.draft ? '（仕組みの中身も入りました）' : ''}</p>` : s.auto
     ? `<p>ボタンを押すと GitHub が開きます。GitHub のアカウントでログイン（なければ「Continue with Google」で作る）→ 本人確認でメールに届くコードを入れる →「Create GitHub App」→「Install」→「Authorize」の順に押してください。御社の GitHub に非公開のリポジトリができ、仕組みの中身が入ります（3分）</p><form method="post" action="/setup/github"><button>GitHub につなぐ</button></form>`
@@ -63,35 +64,55 @@ function view(s, origin, msg = '') {
   const google = s.google ? `<p class="muted">台帳（Google スプレッドシート）を作りました。<a href="https://docs.google.com/spreadsheets/d/${esc(s.sheet)}/edit" target="_blank" rel="noopener">開く</a></p>`
     : `<p>ボタンを押すとコードが出ます。Google の画面にそのコードを入れて「許可」を押してください。この仕組みが作るシートだけを使い、ほかのファイルは見ません（1分）</p><button id="g" type="button">Google で許可</button><div id="gout" class="muted"></div>`;
   const field = (name, label, hint, type = 'text') => has(name) ? `<p class="muted">${label}：入っています（変えるときだけ入れ直す）</p><label>${label}<input name="${name}" type="${type}" autocomplete="off"></label>` : `<label>${label}<input name="${name}" type="${type}" autocomplete="off" placeholder="${esc(hint)}"></label>`;
-  const slack = s.notify === 'slack';
+  const slack = s.notify === 'slack', where = slack ? 'Slack' : 'Discord', hookKey = slack ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL';
   const hook = slack
-    ? `<details><summary>Slack の Incoming Webhook の出し方（3分）</summary><ol><li>https://api.slack.com/apps を開き「Create New App」→「From scratch」（名前は「Orbit Package」、ワークスペースは御社のもの）</li><li>左の「Incoming Webhooks」を On にし、「Add New Webhook to Workspace」で知らせを受けるチャンネルを選ぶ</li><li>出た「Webhook URL」をコピーして、下に貼る</li></ol></details>
+    ? `<details open><summary>Slack の Incoming Webhook の出し方（3分）</summary><ol><li>https://api.slack.com/apps を開き「Create New App」→「From scratch」（名前は「Orbit Package」、ワークスペースは御社のもの）</li><li>左の「Incoming Webhooks」を On にし、「Add New Webhook to Workspace」で知らせを受けるチャンネルを選ぶ</li><li>出た「Webhook URL」をコピーして、下に貼る</li></ol></details>
     ${field('SLACK_WEBHOOK_URL', 'Slack の Webhook URL', 'https://hooks.slack.com/services/…', 'url')}`
-    : `<details><summary>Discord のウェブフック URL の出し方（3分）</summary><ol><li>Discord で御社のサーバーを作る（あれば使う）</li><li>知らせを受けるチャンネルの ⚙（チャンネルの編集）→「連携サービス」→「ウェブフック」→「新しいウェブフック」</li><li>「ウェブフック URL をコピー」して、下に貼る</li></ol></details>
+    : `<details open><summary>Discord のウェブフック URL の出し方（3分）</summary><ol><li>Discord で御社のサーバーを作る（あれば使う）</li><li>知らせを受けるチャンネルの ⚙（チャンネルの編集）→「連携サービス」→「ウェブフック」→「新しいウェブフック」</li><li>「ウェブフック URL をコピー」して、下に貼る</li></ol></details>
     ${field('DISCORD_WEBHOOK_URL', 'Discord のウェブフック URL', 'https://discord.com/api/webhooks/…', 'url')}`;
-  const keys = `<form method="post" action="/setup/secrets" style="display:grid;gap:12px">
-    ${hook}
+  const keyForm = (step, inner, label) => `<form method="post" action="/setup/secrets?step=${step}" style="display:grid;gap:12px">${inner}<button>${label}</button></form>`;
+  const claude = `<details open><summary>Claude の鍵の出し方（2分）</summary><p>API のときは https://console.anthropic.com の「API Keys」で作る。定額の Claude のときは、PC のターミナルで claude setup-token を流して出た鍵</p></details>
+    ${field('CLAUDE_KEY', 'Claude の鍵（sk-ant- で始まる）', 'sk-ant-…', 'password')}`;
+  const extras = `<p class="muted">SNS の投稿やメールを仕事に使う会社だけ。使わなければ飛ばして大丈夫です（あとから足せます）</p>
     <details><summary>Buffer の鍵の出し方（SNS をつなぐ・8分）</summary><ol><li>https://buffer.com に Google でログインし、発信する SNS（Instagram はプロアカウント・Threads・X）を「チャンネル」としてつなぐ</li><li>「Settings」→「API」で鍵を作り、下に貼る</li></ol></details>
     ${field('BUFFER_API_KEY', 'Buffer の鍵', '')}
     <details><summary>メールの「アプリ パスワード」の出し方（3分）</summary><ol><li>https://myaccount.google.com/apppasswords を開く（2段階認証が要ります）</li><li>名前に「AI の係」と入れて作成 → 出た16文字を下に貼る</li></ol></details>
-    ${field('MAIL_USER', '使うメールアドレス', 'example@gmail.com', 'email')}${field('MAIL_PASSWORD', 'アプリ パスワード（16文字）', '', 'password')}
-    <details><summary>Claude の鍵の出し方（2分）</summary><p>API のときは https://console.anthropic.com の「API Keys」で作る。定額の Claude のときは、ターミナルで claude setup-token を流して出た鍵</p></details>
-    ${field('CLAUDE_KEY', 'Claude の鍵（sk-ant- で始まる）', 'sk-ant-…', 'password')}
-    <button>入れる（入れた物だけ・あとから足せます）</button></form>`;
+    ${field('MAIL_USER', '使うメールアドレス', 'example@gmail.com', 'email')}${field('MAIL_PASSWORD', 'アプリ パスワード（16文字）', '', 'password')}`;
   const ready = s.github && s.draft;
-  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${slack ? 'Slack' : 'Discord'} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form>`
-    : ready ? `<p>入れ終わったら押してください。会社の設定とレシピを入れ、正しく動くかを診断します（結果は ${slack ? 'Slack' : 'Discord'} へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">${s.auto ? '1' : '1と2'}が済むと押せます</p>`;
-  const script = s.google ? '' : `<script>
+  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form>`
+    : ready ? `<p>押すと、会社の設定とレシピを入れ、正しく動くかを診断します（結果は ${where} へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">GitHub${s.auto ? '' : 'と導入コード'}が済むと押せます</p>`;
+  const claudeOk = has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY');
+  // 手順（must＝必須）。ok はその手順の確かめが通ったか、test は通ったときに出す一言
+  const steps = [
+    { id: 'github', title: 'GitHub につなぐ', must: true, ok: !!s.github, body: gh, test: `つながりました（${esc(s.repo || '')}）` },
+    ...(s.auto ? [] : [{ id: 'draft', title: '導入コード', must: true, ok: !!s.draft, body: draft, test: '会社の設定を取り込みました' }]),
+    { id: 'google', title: 'Google で許可', must: true, ok: !!s.google, body: google, test: '台帳のシートを作りました' },
+    { id: 'notify', title: `知らせの先（${where}）`, must: true, ok: has(hookKey), body: keyForm('notify', hook, '入れて、試しの知らせを送る'), test: `試しの知らせを送りました。${where} に「つながりました」が届いているか見てください` },
+    { id: 'claude', title: 'Claude の鍵', must: true, ok: claudeOk, body: keyForm('claude', claude, '入れる'), test: '鍵の形を確かめました（本当に動くかは、最後の仕上げの診断で確かめます）' },
+    { id: 'extras', title: 'SNS とメール', must: false, ok: has('BUFFER_API_KEY') || has('MAIL_PASSWORD'), body: keyForm('extras', extras, '入れる'), test: '入れました' },
+    { id: 'finish', title: '仕上げ', must: true, ok: !!s.finished, body: finish, test: `診断を流しました。結果は ${where} に届きます` },
+  ];
+  const ix = Math.max(0, steps.findIndex(x => x.id === want) >= 0 ? steps.findIndex(x => x.id === want) : steps.findIndex(x => x.must && !x.ok) >= 0 ? steps.findIndex(x => x.must && !x.ok) : steps.length - 1);
+  const cur = steps[ix], next = steps[ix + 1], prev = steps[ix - 1];
+  const musts = steps.filter(x => x.must), doneN = musts.filter(x => x.ok).length, pct = Math.round(doneN / musts.length * 100);
+  const nav = `<ol class="steps"><li class="done"><span>✓</span>はじめに（2段階認証・Cloudflare で許可）</li>${steps.map((x, i) =>
+    `<li class="${x.ok ? 'done' : ''} ${i === ix ? 'cur' : ''}"><a href="/setup?step=${x.id}"><span>${x.ok ? '✓' : i + 1}</span>${x.title}${x.must ? '' : '<small>（使う会社だけ）</small>'}</a></li>`).join('')}</ol>`;
+  const test = cur.ok ? `<p class="pass">✓ 確かめました：${cur.test}</p>` : '';
+  const moves = `<div class="row moves">${prev ? `<a class="btn sub" href="/setup?step=${prev.id}">← 前へ</a>` : ''}${next
+    ? (cur.ok || !cur.must ? `<a class="btn" href="/setup?step=${next.id}">${cur.ok ? '次へ' : '使わない（飛ばす）'} →</a>` : `<span class="muted">この手順が済むと「次へ」が出ます</span>`) : ''}</div>`;
+  const card = `<section class="card ${cur.ok ? 'ok' : ''}"><h2><span class="n">${cur.ok ? '✓' : ix + 1}</span>${cur.title}${cur.ok ? '<span class="tag">済み</span>' : ''}</h2>${cur.body}${test}${moves}</section>`;
+  const bar = `<div class="progress"><div class="ptext">必須の手順 ${doneN} / ${musts.length} 済み${doneN === musts.length ? '・導入が終わりました' : ''}</div><div class="track"><div class="fill" style="width:${pct}%"></div></div></div>`;
+  const script = s.google || cur.id !== 'google' ? '' : `<script>
 document.getElementById('g').onclick=async()=>{const o=document.getElementById('gout');o.textContent='準備しています…';
 const r=await (await fetch('/setup/google/start',{method:'POST'})).json();if(r.error){o.innerHTML='<span class=err>'+r.error+'</span>';return}
 o.innerHTML='<p>コード：<span class=code>'+r.user_code+'</span></p><p><a href="'+r.verification_url+'" target="_blank" rel="noopener">Google の画面を開く</a> → コードを入れて「許可」</p><p>待っています…</p>';
-const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{method:'POST'})).json();if(p.status==='ok'){clearInterval(t);location.reload()}else if(p.status==='error'){clearInterval(t);o.innerHTML+='<p class=err>'+p.error+'</p>'}},(r.interval||5)*1000)}</script>`;
-  return page('Orbit Package の設定', `<h1>Orbit Package の設定</h1><p class="muted">上から順に進めてください。終わった所には ✓ が付きます。鍵は暗号化して御社の GitHub に入り、担当者にも見えません</p>
+const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{method:'POST'})).json();if(p.status==='ok'){clearInterval(t);location.href='/setup?step=google'}else if(p.status==='error'){clearInterval(t);o.innerHTML+='<p class=err>'+p.error+'</p>'}},(r.interval||5)*1000)}</script>`;
+  return page('Orbit Package の設定', `<h1>Orbit Package の設定</h1><p class="muted">1つずつ進めます。済むと ✓ が付き、「次へ」が出ます。鍵は暗号化して御社の GitHub に入り、担当者にも見えません</p>
+    ${nav}
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
-    ${card(1, s.github, 'GitHub につなぐ', gh)}${s.auto ? '' : card(2, s.draft, '導入コード', draft)}${card(s.auto ? 2 : 3, s.google, 'Google で許可', google)}
-    ${card(s.auto ? 3 : 4, [slack ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる（知らせの先と Claude は必須・Buffer とメールは使う会社だけ）', keys)}
-    ${card(s.auto ? 4 : 5, s.finished, '仕上げ', finish)}
-    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・棚（仕事を見る・言葉で頼んで作る・育てる）：<a href="${origin}/shelf">${origin}/shelf</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>${script}`);
+    ${card}
+    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・棚（仕事を見る・言葉で頼んで作る・育てる）：<a href="${origin}/shelf">${origin}/shelf</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>
+    ${bar}${script}`);
 }
 
 const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}<p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
@@ -348,5 +369,6 @@ export async function route(req, env) {
     if (path === '/setup/draft' && req.method === 'POST') msg = await importDraft(env, gh, (await form(req)).code || '');
     if (path === '/setup/finish' && req.method === 'POST') msg = await finish(env, gh, origin);
   } catch (e) { msg = `⚠ ${String(e.message || e).slice(0, 200)}`; }
-  return view(await viewState(env), origin, msg);
+  const want = url.searchParams.get('step') || { '/setup/github/back': 'github', '/setup/github/installed': 'github', '/setup/draft': 'draft', '/setup/finish': 'finish' }[path] || '';   // 押した手順をそのまま見せる（確かめの結果と「次へ」）
+  return view(await viewState(env), origin, msg, want);
 }
