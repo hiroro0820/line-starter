@@ -5,7 +5,7 @@ compatibility_date = "2026-10-01"
 workers_dev = true
 
 [triggers]
-crons = ["*/30 * * * *"]
+crons = ["* * * * *"]   # 1分ごとの見回り（Cloudflare 側なので GitHub Actions の分は使わない・10/20）
 
 # 置き場は1つ（設定と画像）。番号は Deploy の画面が作った置き場の物に置き換わる（10/18 t3）
 [[kv_namespaces]]
@@ -16,3 +16,12 @@ id = "orbit-package-config"
 ONBOARD_API = "https://orbit-package.com/api/onboard"
 GOOGLE_CLIENT_ID = "964060622908-3bu234gembpqbk6khked80k2sj5eikk9.apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET = "-"   # 合言葉は導入コードで、設定のページが置き場に入れる
+
+# 出来事の受け口の常駐の担当者（Durable Object・10/20）
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]

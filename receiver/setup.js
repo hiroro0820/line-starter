@@ -41,7 +41,7 @@ async function sessionKey(env) {   // ログインのクッキーの鍵：合言
   if (!k) { k = random(24); await env.CONFIG.put('session_key', k); }
   return k;
 }
-async function loggedIn(env, req) {
+export async function loggedIn(env, req) {
   const c = /(?:^|;\s*)setup=([^;]+)/.exec(req.headers.get('cookie') || '');
   return !!c && same(c[1], await hmac(await sessionKey(env), 'setup'));
 }
@@ -91,7 +91,7 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
     ${card(1, s.github, 'GitHub につなぐ', gh)}${s.auto ? '' : card(2, s.draft, '導入コード', draft)}${card(s.auto ? 2 : 3, s.google, 'Google で許可', google)}
     ${card(s.auto ? 3 : 4, [slack ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL'].every(has) && (has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY')), '鍵を入れる（知らせの先と Claude は必須・Buffer とメールは使う会社だけ）', keys)}
     ${card(s.auto ? 4 : 5, s.finished, '仕上げ', finish)}
-    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・棚（部品とレシピを見る・組む・育てる）：<a href="${origin}/shelf">${origin}/shelf</a>（どちらもこのページと同じログインで入れます）</p>${script}`);
+    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・棚（仕事を見る・言葉で頼んで作る・育てる）：<a href="${origin}/shelf">${origin}/shelf</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>${script}`);
 }
 
 const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}<p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
@@ -242,6 +242,18 @@ async function finish(env, gh, origin) {
   return '仕上げを始めました（数分）。結果は知らせの先（Slack か Discord）に届きます';
 }
 
+// ── 出来事の受け口の案内（10/20）：フォーム・GitHub・決済などの知らせを /hook/<から> に送ると、条件に合うレシピがその場で動く。合言葉（署名の鍵）は置き場に作る
+async function hookPage(req, env, origin) {
+  let secret = env.HOOK_SECRET || await env.CONFIG.get('hook_secret');
+  if (req.method === 'POST' && !env.HOOK_SECRET && (await form(req)).regen === '1') secret = '';   // 作り直し（古い合言葉は使えなくなる）
+  if (!secret) { secret = random(24); await env.CONFIG.put('hook_secret', secret); }
+  return page('出来事の受け口', `<h1>出来事の受け口</h1><p class="muted">フォームや外のサービスから「何か起きた」という知らせをここに送ると、条件に合うレシピがその場で動きます（見回りを待ちません）。外に出る操作は、いつもどおりあなたの承認が先です。</p>
+    <div class="card"><b>送り先の住所</b><p class="code">${esc(origin)}/hook/<span>form</span></p><p class="muted">最後の「form」は知らせの種類の名前です。レシピの「きっかけ」の「から」と同じ名前にします。</p></div>
+    <div class="card"><b>合言葉（署名の鍵）</b><p class="code">${esc(secret)}</p><p class="muted">送る側は、本文を HMAC-SHA256 で署名し、ヘッダー <code>x-orbit-signature</code> に入れます。署名がない知らせは受けません。同じ出来事を2回送っても、動くのは1回です（ヘッダー <code>x-orbit-event-id</code> に出来事の番号を入れます）。</p>
+    ${env.HOOK_SECRET ? '' : '<form method="post"><input type="hidden" name="regen" value="1"><button class="sub">合言葉を作り直す（古い物は使えなくなります）</button></form>'}</div>
+    <p class="muted"><a href="/setup">← 設定のページへ</a>・<a href="/shelf">棚へ</a></p>`);
+}
+
 // ── 承認のページ（Discord の知らせのリンクから）
 async function approval(req, env, gh, n, url) {
   const key = await env.CONFIG.get('approve_key');
@@ -311,6 +323,7 @@ export async function route(req, env) {
   // GitHub から戻る道（ログインのクッキーは SameSite=Lax で付いてくる）
   if (!(await loggedIn(env, req))) return login();
   if (path === '/i') return instruct(req, env, gh);
+  if (path === '/setup/hook') return hookPage(req, env, origin);
   if (path === '/shelf' || path.startsWith('/shelf/')) { const r = await shelfRoute(req, env, gh, url); if (r) return r; }   // 棚の画面（部品とレシピを見る・組む・育てる・10/19）
   let msg = '';
   try {

@@ -4,10 +4,14 @@
 // 置き方：リポジトリの .github/workflows/receiver.yml が自動で置く（お客様は Cloudflare の鍵をリポジトリに貼るだけ）。
 // 承認の状態＝Issue、途中の荷物＝GitHub の成果物。公開画像だけ KV（MEDIA）に置く。
 import { handle } from './handle.js';
-import { route } from './setup.js';
+import { route, loggedIn } from './setup.js';
+import { onHook, retrying } from './events.js';
+import { Hub, hubOf } from './hub.js';
+import TRIGGERS_FILE from './triggers.json' with { type: 'json' };   // 出来事で起こすレシピの表（schedule.py triggers が書く）
 import { repoApi } from './github_app.js';
 import SCHEDULE_FILE from './schedule.json' with { type: 'json' };   // レシピの定時の表（仕上げとレシピの変更のたびにリポジトリへ書き直す・B の形）
 
+export { Hub };   // Durable Object（出来事の受け口の常駐の担当者）
 const hex = h => Uint8Array.from(h.match(/.{2}/g) || [], b => parseInt(b, 16));
 
 export async function verify(raw, sig, ts, publicKeyHex) {
@@ -28,9 +32,14 @@ export function githubOf(env) {
 }
 
 // schedule.py の小さな規則を判定。曜日は月=0〜日=6、日本時間の30分枠。
-export function isDue(rule, now) {
+export function isDue(rule, now, exact = false) {
   const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
   const slot = jst.getUTCHours() * 2 + Math.floor(jst.getUTCMinutes() / 30);
+  if (exact) {   // 1分ごとの見回り（cron が * * * * * の受け口）：ちょうどその分だけ。表に minutes がない古い表は30分枠のまま
+    const mod = jst.getUTCHours() * 60 + jst.getUTCMinutes();
+    if ('interval' in rule) return rule.interval > 0 && mod % rule.interval === 0;
+    if (rule.minutes) return rule.minutes.includes(mod) && (!rule.weekdays || rule.weekdays.includes((jst.getUTCDay() + 6) % 7)) && (!rule.monthdays || rule.monthdays.includes(jst.getUTCDate()));
+  }
   if ('interval' in rule) {
     const n = rule.interval, start = slot * 30;
     return n > 0 && Math.ceil(start / n) * n < start + 30;
@@ -56,21 +65,46 @@ export async function scheduleOf(env, gh, now = Date.now()) {
   return SCHEDULE_FILE;
 }
 
-export async function dispatchDue(env, now, gh = repoApi(env)) {
+// 出来事の表：Worker の設定 → 置き場に控えた物（1時間）→ リポジトリの receiver/triggers.json → まとめたときの表
+export async function triggersOf(env, gh, now = Date.now()) {
+  if (env.TRIGGERS) return JSON.parse(env.TRIGGERS);
+  if (env.CONFIG) {
+    const c = await env.CONFIG.get('triggers', 'json');
+    if (c && now - c.at < 3600 * 1000) return c.list;
+    const r = await gh('GET', '/contents/receiver/triggers.json');
+    if (r.status === 200 && r.json.content) {
+      const list = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(r.json.content.replace(/\s/g, '')), ch => ch.charCodeAt(0))));
+      await env.CONFIG.put('triggers', JSON.stringify({ at: now, list })); return list;
+    }
+    if (c) return c.list;
+  }
+  return TRIGGERS_FILE;
+}
+
+export async function dispatchDue(env, now, gh = repoApi(env), opts = {}) {
   const recipes = await scheduleOf(env, gh, now.getTime());
-  const ids = [...new Set(recipes.filter(r => isDue(r.rule, now)).map(r => r.id))];
+  const ids = [...new Set(recipes.filter(r => isDue(r.rule, now, !!opts.exact)).map(r => r.id))];
   if (!ids.length) return;
-  const r = await gh('POST', '/actions/workflows/recipes.yml/dispatches', { ref: 'main', inputs: { ids: ids.join(',') } });
-  if (r.status !== 204) throw new Error(`レシピの起動に失敗：GitHub ${r.status}`);
+  const r = await retrying(() => gh('POST', '/actions/workflows/recipes.yml/dispatches', { ref: 'main', inputs: { ids: ids.join(',') } }), opts);   // 一瞬の不調は3回までやり直す
+  if (r.status !== 204) {
+    try { if (env.CONFIG) await env.CONFIG.put('dispatch_fail', JSON.stringify({ at: now.toISOString(), ids, status: r.status })); } catch (e) { /* 控えが書けなくても、失敗は下で知らせる */ }   // 抜け見張り（watchdog）が、飛んだ回を見つける手がかり
+    throw new Error(`レシピの起動に失敗：GitHub ${r.status}`);
+  }
 }
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(dispatchDue(env, new Date(event.scheduledTime)));
+    ctx.waitUntil(dispatchDue(env, new Date(event.scheduledTime), undefined, { exact: event.cron === '* * * * *' }));   // 1分ごとの見回り（cron が * * * * *）なら1分単位・30分ごとの古い受け口は30分枠
   },
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
     if (path === '/' && request.method === 'GET' && /text\/html/.test(request.headers.get('accept') || '')) return Response.redirect(new URL('/setup', request.url).toString(), 302);   // ブラウザで住所をそのまま開いたら設定のページへ（Discord の受け口・生存確認はそのまま・10/18 t3）
+    if (path.startsWith('/hook/')) { const gh = repoApi(env); return onHook({ source: decodeURIComponent(path.slice(6)), request, env: { ...env, HOOK_SECRET: env.HOOK_SECRET || (env.CONFIG && await env.CONFIG.get('hook_secret')) || '' }, gh, hub: hubOf(env), rules: await triggersOf(env, gh) }); }   // 出来事の受け口（署名つき・10/20）
+    if (path === '/live') {   // 動きのライブ表示（WebSocket。ログインした人だけ）
+      if (!await loggedIn(env, request)) return new Response('login', { status: 401 });
+      const hub = hubOf(env);
+      return hub.live ? hub.live(request) : new Response('この受け口にはライブ表示の担当者（HUB）がありません', { status: 501 });
+    }
     const page = await route(request, env);
     if (page) return page;
     if (request.method === 'GET' && path.startsWith('/m/')) {
