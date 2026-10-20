@@ -4,7 +4,7 @@
 // 置き方：リポジトリの .github/workflows/receiver.yml が自動で置く（お客様は Cloudflare の鍵をリポジトリに貼るだけ）。
 // 承認の状態＝Issue、途中の荷物＝GitHub の成果物。公開画像だけ KV（MEDIA）に置く。
 import { handle } from './handle.js';
-import { route, loggedIn } from './setup.js';
+import { route, loggedIn, relayIn } from './setup.js';
 import { onHook, retrying } from './events.js';
 import { Hub, hubOf } from './hub.js';
 import TRIGGERS_FILE from './triggers.json' with { type: 'json' };   // 出来事で起こすレシピの表（schedule.py triggers が書く）
@@ -96,8 +96,9 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(dispatchDue(env, new Date(event.scheduledTime), undefined, { exact: event.cron === '* * * * *' }));   // 1分ごとの見回り（cron が * * * * *）なら1分単位・30分ごとの古い受け口は30分枠
   },
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
+    if (path === '/setup/relay' && request.method === 'POST') return relayIn(request, env, ctx);   // Slack の #orbit の書き込み（受付から・その瞬間に・10/20）
     if (path === '/' && request.method === 'GET' && /text\/html/.test(request.headers.get('accept') || '')) return Response.redirect(new URL('/setup', request.url).toString(), 302);   // ブラウザで住所をそのまま開いたら設定のページへ（Discord の受け口・生存確認はそのまま・10/18 t3）
     if (path.startsWith('/hook/')) { const gh = repoApi(env); return onHook({ source: decodeURIComponent(path.slice(6)), request, env: { ...env, HOOK_SECRET: env.HOOK_SECRET || (env.CONFIG && await env.CONFIG.get('hook_secret')) || '' }, gh, hub: hubOf(env), rules: await triggersOf(env, gh) }); }   // 出来事の受け口（署名つき・10/20）
     if (path === '/live') {   // 動きのライブ表示（WebSocket。ログインした人だけ）
