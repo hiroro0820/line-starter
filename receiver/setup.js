@@ -308,6 +308,7 @@ async function saveSecrets(env, gh, f) {
   if (f.MAIL_USER) await put('MAIL_USER', f.MAIL_USER);
   if (f.MAIL_PASSWORD) await put('MAIL_PASSWORD', f.MAIL_PASSWORD.replace(/\s+/g, ''));
   if (f.CLAUDE_KEY) {
+    f.CLAUDE_KEY = f.CLAUDE_KEY.replace(/\s+/g, '');   // setup-token の鍵は端末で折り返して表示され、コピーすると改行が混ざる（10/21 t4：Not logged in）
     if (/^sk-ant-oat/.test(f.CLAUDE_KEY)) await put('CLAUDE_CODE_OAUTH_TOKEN', f.CLAUDE_KEY);
     else if (/^sk-ant-/.test(f.CLAUDE_KEY)) await put('ANTHROPIC_API_KEY', f.CLAUDE_KEY);
     else bad.push('Claude の鍵は sk-ant- で始まります');
