@@ -5,6 +5,7 @@
 // 承認のページ /a/<Issue>?s=<署名>（Discord の知らせのリンクから）と、指示のページ /i も、ここで受ける。
 // 入口は合言葉（Deploy のときにお客様が決めた SETUP_PASSWORD）。鍵の値は画面にも記録にも二度と出さない。
 import { shelfRoute } from './shelf.js';
+import { appLink, revokeDevices } from './device.js';   // 大元の画面（orbit-package.com/app）へ入る端末の合言葉（10/22）
 import { repoApi, manifest, convert, putSecret, commitFiles, installationToken, call, userToken, ensureRepo } from './github_app.js';
 
 const enc = new TextEncoder();
@@ -59,7 +60,7 @@ async function tell(env, event, extra = {}) {   // 担当者に進み具合を�
 async function postEntry(env, origin, renew = false) {
   let k = renew ? '' : await env.CONFIG.get('entry_key');
   if (!k) { k = random(24); await env.CONFIG.put('entry_key', k); }
-  const link = `${origin}/e/${k}`, text = `📌 Orbit Package の入口：仕事を組む・頼む → ${link}\nこのリンクから開くと、ログインなしで入れます（一度開いた端末は、そのあと直接開いても入れます）。社外の人には見せないでください`;
+  const link = `${origin}/e/${k}`, text = `📌 Orbit Package の入口：ホーム（仕事の様子・頼む・承認）→ ${link}\nこのリンクから開くと、ログインなしで入れます（一度開いた端末は、そのあと orbit-package.com/app を直接開いても入れます）。社外の人には見せないでください`;
   const c = await env.CONFIG.get('slack', 'json'), sh = await env.CONFIG.get('slack_hook'), dh = await env.CONFIG.get('discord_hook');
   const post = (u, body, h = {}) => fetch(u, { method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8', ...h }, body: JSON.stringify(body) }).then(async r => r.ok && (r.status === 204 || (await r.json().catch(() => ({ ok: true }))).ok !== false)).catch(() => false);
   const sent = c && c.token ? await post('https://slack.com/api/chat.postMessage', { channel: c.channel, text }, { authorization: `Bearer ${c.token}` })
@@ -160,7 +161,7 @@ function view(s, origin, msg = '', want = '') {
     <details><summary>メールの「アプリ パスワード」の出し方（3分）</summary><ol><li>https://myaccount.google.com/apppasswords を開く（2段階認証が要ります）</li><li>名前に「AI の係」と入れて作成 → 出た16文字を下に貼る</li></ol></details>
     ${field('MAIL_USER', '使うメールアドレス', 'example@gmail.com', 'email')}${field('MAIL_PASSWORD', 'アプリ パスワード（16文字）', '', 'password')}`;
   const ready = s.github && s.draft;
-  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form><p class="muted">仕組みの新しい版は毎日 4:10 に確かめます。互換の確かめが通ると、知らせの先に「✅ 取り込む」のリンクが届きます</p><form method="post" action="/setup/update"><button class="sub">今すぐ新しい版を確かめる</button></form><p class="muted">知らせの先に「📌 入口」のリンクがあります。そこから開くと、どの端末でもログインなしで入れます</p><form method="post" action="/setup/entry"><button class="sub">入口のリンクを作り直して送る（前のリンクは使えなくなります）</button></form>`
+  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form><p class="muted">仕組みの新しい版は毎日 4:10 に確かめます。互換の確かめが通ると、知らせの先に「✅ 取り込む」のリンクが届きます</p><form method="post" action="/setup/update"><button class="sub">今すぐ新しい版を確かめる</button></form><p><a class="btn" href="/app/open">ホームを開く（仕事の様子・頼む・承認）</a></p><p class="muted">知らせの先に「📌 入口」のリンクがあります。そこから開くと、どの端末でもログインなしで入れます</p><form method="post" action="/setup/entry"><button class="sub">入口のリンクを作り直して送る（前のリンクは使えなくなります）</button></form><form method="post" action="/setup/devices/revoke"><button class="sub">ホームに入っている端末を全部締め出す（リンクが漏れたとき）</button></form>`
     : ready ? `<p>押すと、会社の設定とレシピを入れ、正しく動くかを診断します（結果は ${where} へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">GitHub${s.auto ? '' : 'と導入コード'}が済むと押せます</p>`;
   const claudeOk = has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY');
   // 手順（must＝必須）。ok はその手順の確かめが通ったか、test は通ったときに出す一言
@@ -362,6 +363,9 @@ async function hookPage(req, env, origin) {
 }
 
 // ── 承認のページ（Discord の知らせのリンクから）
+// 承認か取りやめを決める（リンクのページと大元の画面で共通・10/22）。続きは resume.yml が動かす。GitHub の返事 { status } を返す（204 なら受け付けた）
+export const decideApproval = (gh, n, ok, note, by) => gh('POST', '/actions/workflows/resume.yml/dispatches', { ref: 'main', inputs: { issue: String(n), ok: String(!!ok), note: String(note || '').slice(0, 1000), by } });
+export const setupFinished = async env => !!(await state(env)).finished;   // 仕上げまで済んだか（画面の導入の案内に使う）
 async function approval(req, env, gh, n, url) {
   const key = await env.CONFIG.get('approve_key');
   if (!key || !same(url.searchParams.get('s') || '', await hmac(key, `a:${n}`))) return page('承認', '<h1>このリンクは使えません</h1><p class="muted">知らせの中のボタンから開いてください</p>');
@@ -371,7 +375,7 @@ async function approval(req, env, gh, n, url) {
   if (req.method === 'POST') {
     if (iss.json.state === 'closed') return page('承認', `<h1>もう決まっています</h1><p>${esc(title)}</p>`);
     const f = await form(req), ok = f.ok === 'true';
-    const r = await gh('POST', '/actions/workflows/resume.yml/dispatches', { ref: 'main', inputs: { issue: String(n), ok: String(ok), note: (f.note || '').slice(0, 1000), by: 'リンク' } });
+    const r = await decideApproval(gh, n, ok, f.note, 'リンク');
     if (r.status !== 204) return page('承認', `<h1>受け付けられませんでした（${r.status}）</h1><p>少しして、もう一度押してください</p>`);
     return page('承認', `<h1>${ok ? '✅ 承認しました' : '❌ やめました'}</h1><p>${esc(title)}</p><p class="muted">${ok ? '続きを動かしています。結果は知らせの先に届きます' : ''}</p>`);
   }
@@ -610,7 +614,7 @@ export async function route(req, env) {   // 入った端末は、開くたび�
 }
 async function routeInner(req, env) {
   const url = new URL(req.url), path = url.pathname, origin = url.origin;
-  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || /^\/e\/[A-Za-z0-9_-]{20,64}$/.test(path) || path === '/shelf' || path.startsWith('/shelf/') || (path === '/m' && req.method === 'POST'))) return null;
+  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || /^\/e\/[A-Za-z0-9_-]{20,64}$/.test(path) || path === '/shelf' || path.startsWith('/shelf/') || path === '/app/open' || (path === '/m' && req.method === 'POST'))) return null;
   if (!env.CONFIG) return page('設定', '<h1>置き場（CONFIG）がありません</h1><p class="muted">担当者からのリンクを開き、「Cloudflare で許可」をもう一度押してください</p>');
   const gh = repoApi(env);
   if (path === '/m') {   // 画像の置き場（Actions から。承認の鍵で確かめる）
@@ -637,7 +641,7 @@ async function routeInner(req, env) {
     return go('/setup', await loginCookie(env));
   }
   const e = /^\/e\/([A-Za-z0-9_-]{20,64})$/.exec(path);   // 入口のリンク（知らせの先の Slack・Discord に置く）：押すとログインなしで組む画面へ（10/21 オーナー）
-  if (e) { const k = await env.CONFIG.get('entry_key'); return k && same(e[1], k) ? go('/shelf/build', await loginCookie(env)) : login('この入口のリンクは古くなっています。知らせの先の新しいリンクから開いてください'); }
+  if (e) { const k = await env.CONFIG.get('entry_key'); return k && same(e[1], k) ? go(await appLink(env, origin), await loginCookie(env)) : login('この入口のリンクは古くなっています。知らせの先の新しいリンクから開いてください'); }   // 押すと大元の画面のホームへ（端末の合言葉つき・10/22）。設定のページのログインも付ける
   if (path === '/setup/login/slack') return slackLogin(req, env, url, origin);   // Slack にログインのリンクを送る・そのリンクで入る（10/21）
   if (path === '/setup/login/google') return googleLoginStart(req, env, url);   // Google でログイン（受付を通る・10/21）
   if (path === '/setup/login/google/back') return googleLoginBack(req, env, url, origin);
@@ -650,6 +654,8 @@ async function routeInner(req, env) {
   // GitHub から戻る道（ログインのクッキーは SameSite=Lax で付いてくる）
   if (!(await loggedIn(env, req))) return login();
   if (path === '/i') return instruct(req, env, gh);
+  if (path === '/app/open') return go(await appLink(env, origin));   // 設定のページから大元の画面へ（この端末の合言葉を作って渡す・10/22）
+  if (path === '/setup/devices/revoke' && req.method === 'POST') { const n = await revokeDevices(env); return view(await viewState(env), origin, `画面に入っていた端末の合言葉を ${n} 個、取り消しました。入り直すときは、知らせの先の「📌 入口」のリンクから開いてください`); }
   if (path === '/setup/hook') return hookPage(req, env, origin);
   if (path === '/shelf' || path.startsWith('/shelf/')) { const r = await shelfRoute(req, env, gh, url); if (r) return r; }   // 棚の画面（部品とレシピを見る・組む・育てる・10/19）
   let msg = '';

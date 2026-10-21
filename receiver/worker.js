@@ -9,6 +9,8 @@ import { onHook, retrying } from './events.js';
 import { Hub, hubOf } from './hub.js';
 import TRIGGERS_FILE from './triggers.json' with { type: 'json' };   // 出来事で起こすレシピの表（schedule.py triggers が書く）
 import { repoApi } from './github_app.js';
+import { appRoute, runEvent, useTicket } from './app_api.js';   // 大元の画面（orbit-package.com/app）のためのデータの口（10/22）
+import { allowedOrigins } from './device.js';
 import SCHEDULE_FILE from './schedule.json' with { type: 'json' };   // レシピの定時の表（仕上げとレシピの変更のたびにリポジトリへ書き直す・B の形）
 
 export { Hub };   // Durable Object（出来事の受け口の常駐の担当者）
@@ -101,12 +103,16 @@ export default {
   },
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (env.CONFIG && !(await env.CONFIG.get('slack_tidy'))) ctx.waitUntil(slackTidy(env, new URL(request.url).origin).catch(() => { }));   // Slack のチャンネルを #orbit だけに片付ける（一度だけ・10/21）
+    if (ctx && env.CONFIG && !(await env.CONFIG.get('slack_tidy'))) ctx.waitUntil(slackTidy(env, new URL(request.url).origin).catch(() => { }));   // Slack のチャンネルを #orbit だけに片付ける（一度だけ・10/21）
     if (path === '/setup/relay' && request.method === 'POST') return relayIn(request, env, ctx);   // Slack の #orbit の書き込み（受付から・その瞬間に・10/20）
     if (path === '/' && request.method === 'GET' && /text\/html/.test(request.headers.get('accept') || '')) return Response.redirect(new URL('/setup', request.url).toString(), 302);   // ブラウザで住所をそのまま開いたら設定のページへ（Discord の受け口・生存確認はそのまま・10/18 t3）
     if (path.startsWith('/hook/')) { const gh = repoApi(env); return onHook({ source: decodeURIComponent(path.slice(6)), request, env: { ...env, HOOK_SECRET: env.HOOK_SECRET || (env.CONFIG && await env.CONFIG.get('hook_secret')) || '' }, gh, hub: hubOf(env), rules: await triggersOf(env, gh) }); }   // 出来事の受け口（署名つき・10/20）
-    if (path === '/live') {   // 動きのライブ表示（WebSocket。ログインした人だけ）
-      if (!await loggedIn(env, request)) return new Response('login', { status: 401 });
+    if (path === '/run/event' && request.method === 'POST') return runEvent(request, env, hubOf(env));   // Actions の仕事の段ごとの動き（live.py・10/22）
+    if (path.startsWith('/app/api/')) return appRoute(request, env, { gh: repoApi(env), hub: hubOf(env) });   // 大元の画面から（端末の合言葉・CORS）
+    if (path === '/live') {   // 動きのライブ表示（WebSocket）。設定のページにログインした人か、大元の画面の切符（60秒・1回だけ）を持つ人だけ
+      const u = new URL(request.url), ticket = u.searchParams.get('ticket'), o = request.headers.get('origin');
+      const ok = ticket ? (!!o && allowedOrigins(env).includes(o) && await useTicket(env, ticket)) : await loggedIn(env, request);
+      if (!ok) return new Response('login', { status: 401 });
       const hub = hubOf(env);
       return hub.live ? hub.live(request) : new Response('この受け口にはライブ表示の担当者（HUB）がありません', { status: 501 });
     }

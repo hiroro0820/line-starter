@@ -95,7 +95,7 @@ const buildPath = id => `cloud/lines/custom/builds/${id}.json`;
 const stale = r => ACTIVE.includes(r['状態']) && Date.now() - (r['更新'] || 0) > STALE_MS;
 const shown = (id, r) => ({ id, ...(stale(r) ? { ...r, 状態: '失敗', 理由: 'うまく進みませんでした。もう一度、頼んでみてください' } : r) });
 async function readBuild(gh, id) { try { return JSON.parse(await readFile(gh, buildPath(id)) || 'null'); } catch { return null; } }
-async function listBuilds(gh, limit = 12) {
+export async function listBuilds(gh, limit = 12) {
   const ls = await gh('GET', '/contents/cloud/lines/custom/builds');
   if (ls.status !== 200 || !Array.isArray(ls.json)) return [];
   const ids = ls.json.map(f => f.name.replace(/\.json$/, '')).filter(i => BUILD_ID.test(i)).sort().reverse().slice(0, limit);
@@ -121,7 +121,7 @@ export function askGuard(rows, text, now = Date.now()) {
   return null;
 }
 const forgetTables = async env => { try { if (env && env.CONFIG) { await env.CONFIG.delete('schedule'); await env.CONFIG.delete('triggers'); } } catch (e) { /* 控えが消せなくても、1時間で入れ替わる */ } };
-async function buildRoute(req, env, gh, url, path) {
+export async function buildRoute(req, env, gh, url, path) {   // 大元の画面（app_api.js）からも呼ぶ（10/22）
   if (path === '/shelf/builds' && req.method === 'GET') return json({ builds: await listBuilds(gh) });
   if (path === '/shelf/build' && req.method === 'GET') {
     const id = url.searchParams.get('id') || '';

@@ -50,7 +50,7 @@ export class Hub {
 
   async log(entry) {
     const e = { ...entry, at: Date.now() };
-    const list = ((await this.state.storage.get('log')) || []).concat(e).slice(-50);
+    const list = ((await this.state.storage.get('log')) || []).concat(e).slice(-200);   // 段ごとの動き（live.py）も入るので 200 件（1回の実行で約12件・10/22）
     await this.state.storage.put('log', list);
     for (const ws of this.state.getWebSockets?.() || []) { try { ws.send(JSON.stringify(e)); } catch { /* 切れた画面は無視 */ } }
     return true;
