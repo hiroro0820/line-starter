@@ -438,7 +438,7 @@ async function notifyPut(req, env, gh) {
 
 export async function route(req, env) {
   const url = new URL(req.url), path = url.pathname, origin = url.origin;
-  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || (path === '/m' && req.method === 'POST'))) return null;
+  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || (path === '/m' && req.method === 'POST'))) return null;
   if (!env.CONFIG) return page('設定', '<h1>置き場（CONFIG）がありません</h1><p class="muted">担当者からのリンクを開き、「Cloudflare で許可」をもう一度押してください</p>');
   const gh = repoApi(env);
   if (path === '/m') {   // 画像の置き場（Actions から。承認の鍵で確かめる）
