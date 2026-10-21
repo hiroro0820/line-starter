@@ -350,23 +350,26 @@ async function updatePage(req, env, gh, h, url) {
   if (ref.status !== 200) return page('更新', '<h1>この版はもう取り込み済みか、なくなっています</h1>');
   const cm = await gh('GET', `/contents/cloud/lines/core.json?ref=${encodeURIComponent(branch)}`);
   let ver = ''; try { ver = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cm.json.content).replace(/\s/g, '')), c => c.charCodeAt(0)))).version || ''; } catch { }
-  if (req.method === 'POST') {
-    const ok = (await form(req)).ok === 'true';
-    if (!ok) { await env.CONFIG.put(`upd_no:${h}`, '1'); return page('更新', `<h1>❌ 見送りました</h1><p class="muted">今の版のまま動きます。次の新しい版が出たら、また知らせます</p>`); }
-    const m = await gh('POST', '/merges', { base: 'main', head: branch, commit_message: `Orbit の更新（${ver}）を取り込む` });
-    if (m.status !== 201 && m.status !== 204) return page('更新', `<h1>取り込めませんでした（${m.status}）</h1><p class="muted">${m.status === 409 ? '芯のファイルが御社で書き換えられていて、ぶつかりました。担当者にお知らせください' : '少しして、もう一度押してください'}</p>`);
-    await gh('DELETE', `/git/refs/heads/${branch}`);
-    const code = await env.CONFIG.get('code');   // 受け口（この画面の仕組み）も新しい版に：自分の鍵を受付に一度だけ見せて置き直してもらう（受付は鍵を残さない・10/21）
-    let rcv = '受け口（この画面）は今の版のままです。新しくするには、手引きの「Cloudflare で許可」をもう一度押してください';
-    if (env.ORBIT_CF_TOKEN && env.ONBOARD_API && code) {
-      const r = await fetch(new URL('/api/cf', env.ONBOARD_API), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redeploy: 1, t: code, token: env.ORBIT_CF_TOKEN }) }).catch(() => null);
-      const j = r ? await r.json().catch(() => ({})) : {};
-      rcv = j.ok ? '受け口（この画面）も新しい版に置き直しました' : `⚠ 受け口は置き直せませんでした（${esc(j.error || (r && r.status) || '受付に届かない')}）。担当者にお知らせください`;
-    }
-    return page('更新', `<h1>✅ 新しい版（${esc(ver)}）を取り込みました</h1><p>${rcv}</p><p class="muted">会社の設定・custom/ は変えていません</p>`);
-  }
+  if (req.method === 'POST') { const r = await decideUpdate(env, gh, h, ver, (await form(req)).ok === 'true'); return page('更新', `<h1>${r.title}</h1>${r.html}`); }
   return page('更新', `<h1>Orbit の新しい版（${esc(ver)}）</h1><p>互換の確かめ（全部のレシピの組み立てとテスト）は通っています。取り込むのは仕組みの決まったファイルだけで、会社の設定・custom/・記録には触りません。</p>
     <form method="post" class="row"><button name="ok" value="true">✅ 取り込む</button><button name="ok" value="false" class="sub">❌ 見送る</button></form>`);
+}
+
+// 芯の更新を取り込む（ok）か見送る。リンクのボタンと Slack の ✅ ❌ のスタンプで共通（10/21）。{ title, html, text } を返す
+async function decideUpdate(env, gh, h, ver, ok) {
+  const branch = `orbit-update/${h}`;
+  if (!ok) { await env.CONFIG.put(`upd_no:${h}`, '1'); return { title: '❌ 見送りました', html: '<p class="muted">今の版のまま動きます。次の新しい版が出たら、また知らせます</p>', text: '今の版のまま動きます。次の新しい版が出たら、また知らせます' }; }
+  const m = await gh('POST', '/merges', { base: 'main', head: branch, commit_message: `Orbit の更新（${ver}）を取り込む` });
+  if (m.status !== 201 && m.status !== 204) { const why = m.status === 409 ? '芯のファイルが御社で書き換えられていて、ぶつかりました。担当者にお知らせください' : '少しして、もう一度押してください'; return { title: `取り込めませんでした（${m.status}）`, html: `<p class="muted">${why}</p>`, text: why }; }
+  await gh('DELETE', `/git/refs/heads/${branch}`);
+  const code = await env.CONFIG.get('code');   // 受け口（この画面の仕組み）も新しい版に：自分の鍵を受付に一度だけ見せて置き直してもらう（受付は鍵を残さない・10/21）
+  let rcv = '受け口（この画面）は今の版のままです。新しくするには、手引きの「Cloudflare で許可」をもう一度押してください';
+  if (env.ORBIT_CF_TOKEN && env.ONBOARD_API && code) {
+    const r = await fetch(new URL('/api/cf', env.ONBOARD_API), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redeploy: 1, t: code, token: env.ORBIT_CF_TOKEN }) }).catch(() => null);
+    const j = r ? await r.json().catch(() => ({})) : {};
+    rcv = j.ok ? '受け口（この画面）も新しい版に置き直しました' : `⚠ 受け口は置き直せませんでした（${j.error || (r && r.status) || '受付に届かない'}）。担当者にお知らせください`;
+  }
+  return { title: `✅ 新しい版（${esc(ver)}）を取り込みました`, html: `<p>${esc(rcv)}</p><p class="muted">会社の設定・custom/ は変えていません</p>`, text: `${rcv}（会社の設定・custom/ は変えていません）` };
 }
 
 // 指示を1件受け付ける（指示のページ・Slack の #orbit から）。Issue にして instruct.yml を起こす。番号を返す（失敗は null）
@@ -384,6 +387,7 @@ export async function relayIn(request, env, ctx, gh = repoApi(env)) {
   const raw = await request.text();
   if (!c || !c.relay_key || !same(request.headers.get('x-orbit-sig') || '', await hmacHex(c.relay_key, raw))) return new Response('forbidden', { status: 403 });
   let m = {}; try { m = JSON.parse(raw); } catch { }
+  if (m.kind === 'reaction') return reactionIn(m, c, env, ctx, gh);   // 知らせへの ✅ ❌ のスタンプ（10/21）
   if (m.channel !== c.channel || !m.ts || !(m.text || '').trim()) return new Response('skip');
   if (await env.CONFIG.get(`seen:${m.ts}`)) return new Response('seen');   // Slack のやり直しで二度来ても一度だけ
   await env.CONFIG.put(`seen:${m.ts}`, '1', { expirationTtl: 86400 });
@@ -395,6 +399,35 @@ export async function relayIn(request, env, ctx, gh = repoApi(env)) {
   if (ctx && ctx.waitUntil) ctx.waitUntil(work); else await work;
   return new Response('ok');
 }
+// 知らせに押された ✅ ❌ のスタンプ。その知らせの本文から芯の更新のリンク（/u/<印>?s=<署名>）を読み、署名が合えばボタンと同じに取り込む・見送る。結果はスレッドに返す（10/21）
+const YES = ['white_check_mark', 'heavy_check_mark', 'ballot_box_with_check'], NO = ['x', 'negative_squared_cross_mark'];
+async function reactionIn(m, c, env, ctx, gh, fetcher = fetch) {
+  const ok = YES.includes(m.reaction), no = NO.includes(m.reaction);
+  if (m.channel !== c.channel || !m.ts || (!ok && !no)) return new Response('skip');
+  const slack = (method, body) => fetcher(`https://slack.com/api/${method}`, { method: 'POST', headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
+  const work = (async () => {
+    const got = await slack('conversations.history', { channel: c.channel, latest: m.ts, inclusive: true, limit: 1 });
+    const msg = (got.messages || [])[0];
+    const u = msg && /\/u\/([0-9a-f]{12})\?s=([A-Za-z0-9_-]+)/.exec(String(msg.text || '') + JSON.stringify(msg.blocks || msg.attachments || ''));
+    if (!u || !msg.bot_id) return;   // 芯の更新の知らせ（受け口の bot が書いた物）だけ
+    const key = await env.CONFIG.get('approve_key');
+    if (!key || !same(u[2], await hmac(key, `u:${u[1]}`))) return;
+    if (await env.CONFIG.get(`seen:r:${u[1]}`)) return;   // 二度押し・Slack のやり直しでも一度だけ
+    await env.CONFIG.put(`seen:r:${u[1]}`, '1', { expirationTtl: 600 });
+    const ref = await gh('GET', `/git/ref/heads/orbit-update/${u[1]}`);
+    let r;
+    if (ref.status !== 200) r = { title: 'この版はもう取り込み済みか、なくなっています', text: '' };
+    else {
+      const cm = await gh('GET', `/contents/cloud/lines/core.json?ref=${encodeURIComponent(`orbit-update/${u[1]}`)}`);
+      let ver = ''; try { ver = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cm.json.content).replace(/\s/g, '')), x => x.charCodeAt(0)))).version || ''; } catch { }
+      r = await decideUpdate(env, gh, u[1], ver, ok);
+    }
+    await slack('chat.postMessage', { channel: c.channel, thread_ts: m.ts, text: `${r.title.replace(/<[^>]+>/g, '')}${r.text ? '\n' + r.text : ''}` });
+  })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(work); else await work;
+  return new Response('ok');
+}
+export const reactionInFor = reactionIn;   // テスト用
 async function hmacHex(key, text) {
   const k = await crypto.subtle.importKey('raw', enc.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return [...new Uint8Array(await crypto.subtle.sign('HMAC', k, enc.encode(text)))].map(x => x.toString(16).padStart(2, '0')).join('');
@@ -438,7 +471,7 @@ async function notifyPut(req, env, gh) {
 
 export async function route(req, env) {
   const url = new URL(req.url), path = url.pathname, origin = url.origin;
-  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || (path === '/m' && req.method === 'POST'))) return null;
+  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || path === '/shelf' || path.startsWith('/shelf/') || (path === '/m' && req.method === 'POST'))) return null;
   if (!env.CONFIG) return page('設定', '<h1>置き場（CONFIG）がありません</h1><p class="muted">担当者からのリンクを開き、「Cloudflare で許可」をもう一度押してください</p>');
   const gh = repoApi(env);
   if (path === '/m') {   // 画像の置き場（Actions から。承認の鍵で確かめる）
