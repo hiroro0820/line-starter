@@ -114,7 +114,8 @@ export async function putFile(gh, path, text, message) {
 // たくさんのファイルを1回のコミットで書く（中身の束の取り込み）。呼び出しは5回だけ（Cloudflare の1回あたりの上限に収める）
 // files：{ パス: { mode: '100644' | '100755', content: 文 } }
 export async function commitFiles(gh, files, message, branch = 'main') {
-  const ref = await gh('GET', `/git/ref/heads/${branch}`);
+  let ref = await gh('GET', `/git/ref/heads/${branch}`);
+  for (let i = 0; ref.status === 404 && i < 4; i++) { await new Promise(r => setTimeout(r, 800)); ref = await gh('GET', `/git/ref/heads/${branch}`); }   // 作った直後の枝は GitHub がしばらく 404 を返す（10/21 t4）
   if (ref.status !== 200) throw new Error(`今の版を読めない（${ref.status}）`);
   const parent = ref.json.object.sha;
   const cur = await gh('GET', `/git/commits/${parent}`);

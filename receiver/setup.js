@@ -333,9 +333,10 @@ export async function coreUpdate(env, gh = repoApi(env), fetcher = fetch) {
   if (main.status !== 200) return { state: 'error', msg: `今の版を読めませんでした（${main.status}）` };
   const mk = await gh('POST', '/git/refs', { ref: `refs/heads/${branch}`, sha: main.json.object.sha });
   if (mk.status !== 201) return { state: 'error', msg: `更新の枝を作れませんでした（${mk.status}）` };
-  await commitFiles(gh, { ...coreFiles(b.files), 'cloud/lines/core.json': coreMark(b) }, `Orbit の更新（${b.version}）`, branch);
+  const drop = () => gh('DELETE', `/git/refs/heads/${branch}`);   // 途中で失敗したら枝を消す（残ると「確かめ中」のまま3日止まる・10/21 t4）
+  try { await commitFiles(gh, { ...coreFiles(b.files), 'cloud/lines/core.json': coreMark(b) }, `Orbit の更新（${b.version}）`, branch); } catch (e) { await drop(); return { state: 'error', msg: String(e.message || e) }; }
   const d = await check();
-  if (d.status !== 204) return { state: 'error', msg: `互換の確かめを起こせませんでした（${d.status}）` };
+  if (d.status !== 204) { await drop(); return { state: 'error', msg: `互換の確かめを起こせませんでした（${d.status}）` }; }
   await env.CONFIG.put(`upd_at:${h}`, String(t));
   return { state: 'checking', version: b.version };
 }
