@@ -54,6 +54,33 @@ async function tell(env, event, extra = {}) {   // 担当者に進み具合を�
   try { await fetch(env.ONBOARD_API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ t: code, event, ...extra }) }); } catch { }
 }
 
+// ── Slack でログイン（10/21 オーナー：新しく入れる物を増やさない）。知らせの先の Slack に、15分・1回だけのリンクを送る。
+// リンクを開くと「入る」のボタン（Slack がリンクの下見で開いても使われないように、入るのは POST だけ）
+async function slackLogin(req, env, url, origin) {
+  if (req.method === 'GET') {
+    const k = url.searchParams.get('k') || '';
+    if (!/^[A-Za-z0-9_-]{20,64}$/.test(k) || await env.CONFIG.get(`ll:${k}`) === null) return login('このリンクはもう使われたか、時間切れです。もう一度送ってください');
+    return page('ログイン', `<h1>Orbit Package に入る</h1><form method="post"><input type="hidden" name="k" value="${esc(k)}"><button>入る</button></form>`);
+  }
+  const f = await form(req);
+  if (f.k) {   // リンクの「入る」
+    const next = /^[A-Za-z0-9_-]{20,64}$/.test(f.k) ? await env.CONFIG.get(`ll:${f.k}`) : null;
+    if (next === null) return login('このリンクはもう使われたか、時間切れです。もう一度送ってください');
+    await env.CONFIG.delete(`ll:${f.k}`);
+    return go(next, await loginCookie(env));
+  }
+  const c = await env.CONFIG.get('slack', 'json');
+  if (!c || !c.token || !c.channel) return login('知らせの先に Slack がまだつながっていません。担当者からのリンクで入ってください');
+  if (await env.CONFIG.get('ll_at')) return login('さっき送りました。Slack のチャンネルを見てください（送り直しは1分あけてください）');
+  await env.CONFIG.put('ll_at', '1', { expirationTtl: 60 });
+  const k = random(24), want = String(f.next || '/setup');
+  await env.CONFIG.put(`ll:${k}`, want.startsWith('/') && !want.startsWith('//') && !want.startsWith('/setup/login') ? want : '/setup', { expirationTtl: 900 });
+  const r = await fetch('https://slack.com/api/chat.postMessage', { method: 'POST', headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ channel: c.channel, text: `🔑 Orbit Package に入るリンクです（15分・1回だけ）\n${origin}/setup/login/slack?k=${k}\n心当たりがなければ、開かずにそのままにしてください` }) }).then(x => x.json()).catch(() => ({}));
+  if (!r.ok) return login('Slack に送れませんでした。少しして、もう一度押してください');
+  return page('ログイン', '<h1>Slack に送りました</h1><p>知らせの先のチャンネルに届いたリンクを開き、「入る」を押してください（15分・1回だけ）。</p>');
+}
+
 // ── Google でログイン（10/21）。受け口の住所は会社ごとに違い Google に登録できないので、受付 /api/login が Google とやりとりし、受付の署名（Ed25519）つきでメールを渡す。
 // 入れるのは、設定のページで登録したメール（CONFIG login_emails）だけ。ログインしたまま押すと、そのアカウントを登録する
 const LOGIN_PUB = 'e06dc7e83d4f03c3e153dad9a6862b9997f52839e97f2be6c3a263491b0a8073';   // 受付の公開鍵（秘密の側は受付の ORBIT_LOGIN_SIGN_KEY）
@@ -152,14 +179,13 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
     ${nav}
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
     ${card}
-    ${s.oauth ? `<section class="card"><h2>Google でログイン</h2><p class="muted">${(s.emails || []).length ? `登録したアカウント：${s.emails.map(esc).join('・')}` : 'まだ登録していません。登録すると、ほかの端末からも Google のアカウントで入れます'}</p><p><a class="btn sub" href="/setup/login/google?next=/setup">${(s.emails || []).length ? 'ほかのアカウントも登録する' : 'このブラウザの Google アカウントを登録する'}</a></p></section>` : ''}
     <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・仕事を組む・頼む：<a href="${origin}/shelf/build">${origin}/shelf/build</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>
     ${bar}${script}`);
 }
 
 const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}
-  <p><a class="btn" id="gl" href="/setup/login/google">Google でログイン</a></p><script>document.getElementById('gl').href+='?next='+encodeURIComponent(location.pathname+location.search)</script>
-  <p class="muted">Google でログインできるのは、設定のページで登録したアカウントだけです（はじめてのときは、下の方法で一度入って登録してください）。</p><p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
+  <form method="post" action="/setup/login/slack"><input type="hidden" name="next" id="nx"><button>Slack にログインのリンクを送る</button></form><script>document.getElementById('nx').value=location.pathname+location.search</script>
+  <p class="muted">知らせの先の Slack のチャンネルに、15分だけ・1回だけ使えるリンクが届きます。スマホでもそのまま入れます。</p><p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
   <form method="post" action="/setup/login" style="display:grid;gap:10px"><input name="password" type="password" required autofocus><button>入る</button></form>`);
 
 async function form(req) { return Object.fromEntries([...(await req.formData()).entries()].map(([k, v]) => [k, String(v).trim()])); }
@@ -537,6 +563,7 @@ export async function route(req, env) {
     await env.CONFIG.delete('login_token');
     return go('/setup', await loginCookie(env));
   }
+  if (path === '/setup/login/slack') return slackLogin(req, env, url, origin);   // Slack にログインのリンクを送る・そのリンクで入る（10/21）
   if (path === '/setup/login/google') return googleLoginStart(req, env, url);   // Google でログイン（受付を通る・10/21）
   if (path === '/setup/login/google/back') return googleLoginBack(req, env, url, origin);
   if (path === '/setup/login' && req.method === 'POST') {
