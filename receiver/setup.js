@@ -148,7 +148,7 @@ function view(s, origin, msg = '', want = '') {
     ${field('DISCORD_WEBHOOK_URL', 'Discord のウェブフック URL', 'https://discord.com/api/webhooks/…', 'url')}`;
   // 知らせの先（10/20）：Slack か Discord を選び、ログインしてチャンネルを選んで許可するだけ。URL を貼る形は「うまくいかないとき」に残す
   const connectButtons = `<p>知らせ（承認のお願い・診断の結果など）を受け取る先を選んでください。ログインして、受け取るチャンネルを選んで「許可」を押すだけです（1分）</p>
-    <p class="muted">Slack：許可すると、Orbit のボットが <b>#orbit</b> を作って、押した人を招きます（同じ名前があれば #orbit-package）。Discord：先に <b>#orbit</b> という新しいチャンネルを作り、許可の画面でそこを選んでください。どちらも、いつもの業務のチャンネルには混ざりません</p>
+    <p class="muted">Slack：許可すると、Orbit のボットが <b>#orbit</b> を作って、押した人を招きます（もう #orbit があればそれを使い、ほかのチャンネルは作りません）。Discord：先に <b>#orbit</b> という新しいチャンネルを作り、許可の画面でそこを選んでください。どちらも、いつもの業務のチャンネルには混ざりません</p>
     <div class="row"><form method="post" action="/setup/notify/start?svc=slack"><button>Slack に追加</button></form><form method="post" action="/setup/notify/start?svc=discord"><button>Discord につなぐ</button></form></div>
     <details><summary>うまくいかないとき：URL を貼って入れる</summary>${`<form method="post" action="/setup/secrets?step=notify" style="display:grid;gap:12px">${hook}<button class="sub">入れて、試しの知らせを送る</button></form>`}</details>`;
   const keyForm = (step, inner, label) => `<form method="post" action="/setup/secrets?step=${step}" style="display:grid;gap:12px">${inner}<button>${label}</button></form>`;
