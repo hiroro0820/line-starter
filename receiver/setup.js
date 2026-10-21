@@ -550,6 +550,43 @@ async function notifyPut(req, env, gh) {
   return Response.json({ ok, msg: msg || '入りませんでした' });
 }
 
+// Slack の片付け（10/21 オーナー：チャンネルの乱立はやめて・足すのは #orbit だけ）。前の作りがつなぎ直すたびに作った #orbit-package・#orbit-xxx から #orbit へ移り、
+// ボットの入っているそれらをアーカイブする。人が作ったほかのチャンネルには触らない。一度済んだら印（slack_tidy）を置いて二度とやらない
+export async function slackTidy(env, origin, gh = repoApi(env), fetcher = fetch) {
+  const c = await env.CONFIG.get('slack', 'json'), done = msg => env.CONFIG.put('slack_tidy', msg).then(() => msg);
+  if (!c || !c.token) return done('slack なし');
+  const api = (m, body) => fetcher(`https://slack.com/api/${m}`, { method: 'POST', headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
+  let all = [];
+  for (let cursor = '', i = 0; i < 20; i++) {
+    const l = await api('conversations.list', { types: 'public_channel', exclude_archived: false, limit: 1000, ...(cursor ? { cursor } : {}) });
+    if (!l.ok) return `一覧を読めません（${l.error}）`;   // 印は置かない（次の機会にやり直す）
+    all = all.concat(l.channels || []); cursor = (l.response_metadata && l.response_metadata.next_cursor) || ''; if (!cursor) break;
+  }
+  const extra = all.filter(x => /^orbit-(package|[a-z0-9]{3})$/.test(x.name) && x.is_member && !x.is_archived);
+  let orbit = all.find(x => x.name === 'orbit');
+  if (!orbit) { const r = await api('conversations.create', { name: 'orbit' }); if (!r.ok) return done(`#orbit を作れません（${r.error}）`); orbit = r.channel; }
+  if (orbit.is_archived) await api('conversations.unarchive', { channel: orbit.id });
+  if (orbit.is_member === false) { const j = await api('conversations.join', { channel: orbit.id }); if (!j.ok) return done(`#orbit に入れません（${j.error}）`); }
+  const moved = c.channel !== orbit.id;
+  if (moved) {
+    const mem = await api('conversations.members', { channel: c.channel, limit: 200 });   // 前のチャンネルにいた人を #orbit に招く
+    if (mem.ok && (mem.members || []).length) await api('conversations.invite', { channel: orbit.id, users: mem.members.join(','), force: true });
+    await putSecret(gh, 'SLACK_CHANNEL_ID', orbit.id);
+    await env.CONFIG.put('slack', JSON.stringify({ ...c, channel: orbit.id }));
+    await mark(env, { slack_channel: 'orbit' });
+  }
+  const gone = extra.filter(x => x.id !== orbit.id);
+  for (const x of gone) await api('conversations.archive', { channel: x.id });
+  if (moved || gone.length) await api('chat.postMessage', { channel: orbit.id, text: `🧹 Orbit Package の知らせを #orbit にまとめました。${gone.map(x => '#' + x.name).join('・') || '前のチャンネル'} はアーカイブしました（Slack の設定からいつでも戻せます）` });
+  if (moved) {
+    const ks = await env.CONFIG.list({ prefix: 'upd_at:' }).catch(() => ({ keys: [] }));   // ✅ 待ちの更新の知らせは、#orbit に出し直す
+    for (const k of ks.keys || []) await env.CONFIG.delete(k.name);
+    if ((ks.keys || []).length) await coreUpdate(env, gh, fetcher).catch(() => { });
+    if (origin) await postEntry(env, origin);
+  }
+  return done(`済み：${moved ? '#orbit へ移した・' : ''}アーカイブ ${gone.length} 件`);
+}
+
 export async function route(req, env) {   // 入った端末は、開くたびにログインの期限を延ばす（10/21）
   const r = await routeInner(req, env);
   if (!r || r.headers.has('set-cookie') || req.method !== 'GET' || !(await loggedIn(env, req).catch(() => false))) return r;
