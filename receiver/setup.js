@@ -34,7 +34,7 @@ const page = (title, body) => new Response(`<!doctype html><html lang="ja"><head
   { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' } });
 const go = (to, cookie) => new Response(null, { status: 303, headers: { location: to, ...(cookie ? { 'set-cookie': cookie } : {}) } });
 
-async function viewState(env) { const code = await env.CONFIG.get('code'); return { ...(await state(env)), auto: !!code, oauth: !!code && !!env.ONBOARD_API }; }
+async function viewState(env) { const code = await env.CONFIG.get('code'); return { ...(await state(env)), auto: !!code, oauth: !!code && !!env.ONBOARD_API, emails: await loginEmails(env) }; }
 async function state(env) { return (await env.CONFIG.get('done', 'json')) || { secrets: [] }; }
 async function mark(env, patch) { const s = { ...(await state(env)), ...patch }; await env.CONFIG.put('done', JSON.stringify(s)); return s; }
 async function sessionKey(env) {   // ログインのクッキーの鍵：合言葉（古い形）か、置き場の鍵（B の形）
@@ -52,6 +52,42 @@ async function tell(env, event, extra = {}) {   // 担当者に進み具合を�
   const code = await env.CONFIG.get('code');
   if (!code || !env.ONBOARD_API) return;
   try { await fetch(env.ONBOARD_API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ t: code, event, ...extra }) }); } catch { }
+}
+
+// ── Google でログイン（10/21）。受け口の住所は会社ごとに違い Google に登録できないので、受付 /api/login が Google とやりとりし、受付の署名（Ed25519）つきでメールを渡す。
+// 入れるのは、設定のページで登録したメール（CONFIG login_emails）だけ。ログインしたまま押すと、そのアカウントを登録する
+const LOGIN_PUB = 'e06dc7e83d4f03c3e153dad9a6862b9997f52839e97f2be6c3a263491b0a8073';   // 受付の公開鍵（秘密の側は受付の ORBIT_LOGIN_SIGN_KEY）
+const b64uDec = t => Uint8Array.from(atob(String(t).replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+export async function loginSigned(p, sig, pub = LOGIN_PUB) {
+  try {
+    const key = await crypto.subtle.importKey('raw', Uint8Array.from(pub.match(/../g), h => parseInt(h, 16)), { name: 'Ed25519' }, false, ['verify']);
+    if (!await crypto.subtle.verify({ name: 'Ed25519' }, key, b64uDec(sig), enc.encode(p))) return null;
+    return JSON.parse(new TextDecoder().decode(b64uDec(p)));
+  } catch { return null; }
+}
+const loginEmails = async env => { try { return JSON.parse(await env.CONFIG.get('login_emails') || '[]'); } catch { return []; } };
+async function googleLoginStart(req, env, url) {
+  const code = await env.CONFIG.get('code');
+  if (!code || !env.ONBOARD_API) return login('Google でのログインは、この受け口ではまだ使えません');
+  const n = random(24), next = url.searchParams.get('next') || '/setup';
+  await env.CONFIG.put(`gl:${n}`, next.startsWith('/') && !next.startsWith('//') ? next : '/setup', { expirationTtl: 600 });
+  const to = `${new URL('/api/login', env.ONBOARD_API)}?t=${encodeURIComponent(code)}&n=${n}`;
+  return new Response(null, { status: 303, headers: { location: to, 'set-cookie': `gn=${n}; Path=/setup/login; HttpOnly; Secure; SameSite=Lax; Max-Age=600` } });
+}
+async function googleLoginBack(req, env, url, origin, pub = env.ORBIT_LOGIN_PUB || LOGIN_PUB) {
+  const v = await loginSigned(url.searchParams.get('p') || '', url.searchParams.get('sig') || '', pub);
+  const gn = (/(?:^|;\s*)gn=([^;]+)/.exec(req.headers.get('cookie') || '') || [])[1];
+  if (!v || v.rcv !== origin || !v.n || v.n !== gn || !(v.exp > Date.now()) || !v.email) return login('Google のログインを確かめられませんでした。もう一度押してください');
+  const next = await env.CONFIG.get(`gl:${v.n}`);
+  if (next === null) return login('このログインはもう使われたか、時間切れです。もう一度押してください');
+  await env.CONFIG.delete(`gl:${v.n}`);
+  const list = await loginEmails(env), email = String(v.email).toLowerCase();
+  if (await loggedIn(env, req)) {   // ログインしたまま押した＝このアカウントを登録する
+    if (!list.includes(email)) await env.CONFIG.put('login_emails', JSON.stringify([...list, email].slice(-10)));
+    return go('/setup?step=finish&g=1');
+  }
+  if (!list.includes(email)) return login(`${email} はまだ登録されていません。下の方法で一度入り、設定のページの「Google でログイン」で登録してください`);
+  return go(next, await loginCookie(env));
 }
 
 // ── 設定のページ（10/20 オーナー：全部を1枚に並べず、1つずつ進む形に。上に手順の順番、真ん中に今の手順と確かめ、下に進み具合のバー）
@@ -116,11 +152,14 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
     ${nav}
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
     ${card}
+    ${s.oauth ? `<section class="card"><h2>Google でログイン</h2><p class="muted">${(s.emails || []).length ? `登録したアカウント：${s.emails.map(esc).join('・')}` : 'まだ登録していません。登録すると、ほかの端末からも Google のアカウントで入れます'}</p><p><a class="btn sub" href="/setup/login/google?next=/setup">${(s.emails || []).length ? 'ほかのアカウントも登録する' : 'このブラウザの Google アカウントを登録する'}</a></p></section>` : ''}
     <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・仕事を組む・頼む：<a href="${origin}/shelf/build">${origin}/shelf/build</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>
     ${bar}${script}`);
 }
 
-const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}<p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
+const login = (msg = '') => page('ログイン', `<h1>ログインしてください</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ''}
+  <p><a class="btn" id="gl" href="/setup/login/google">Google でログイン</a></p><script>document.getElementById('gl').href+='?next='+encodeURIComponent(location.pathname+location.search)</script>
+  <p class="muted">Google でログインできるのは、設定のページで登録したアカウントだけです（はじめてのときは、下の方法で一度入って登録してください）。</p><p>担当者からのリンク（Orbit Package を始める）を開き、「Cloudflare で許可」をもう一度押すと、このページに入り直せます。設定はそのまま残ります。</p><p class="muted">合言葉（SETUP_PASSWORD）を決めてある場合は、下に入れても入れます。</p>
   <form method="post" action="/setup/login" style="display:grid;gap:10px"><input name="password" type="password" required autofocus><button>入る</button></form>`);
 
 async function form(req) { return Object.fromEntries([...(await req.formData()).entries()].map(([k, v]) => [k, String(v).trim()])); }
@@ -498,6 +537,8 @@ export async function route(req, env) {
     await env.CONFIG.delete('login_token');
     return go('/setup', await loginCookie(env));
   }
+  if (path === '/setup/login/google') return googleLoginStart(req, env, url);   // Google でログイン（受付を通る・10/21）
+  if (path === '/setup/login/google/back') return googleLoginBack(req, env, url, origin);
   if (path === '/setup/login' && req.method === 'POST') {
     if (!env.SETUP_PASSWORD) return login('合言葉（SETUP_PASSWORD）がまだ決まっていません。Cloudflare の Worker の「設定」→「変数とシークレット」で入れてください');
     const f = await form(req);
