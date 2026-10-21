@@ -162,7 +162,8 @@ async function buildRoute(req, env, gh, url, path) {
 
 export async function shelfRoute(req, env, gh, url) {
   const path = url.pathname;
-  if (path === '/shelf' && req.method === 'GET') return page();
+  if (path === '/shelf' && req.method === 'GET') return new Response(null, { status: 302, headers: { location: '/shelf/build' } });   // 仕事を頼む入口は「組む」（10/21 オーナー：棚・道具箱・育てるの画面は使わない）
+  if (path === '/shelf/make' && req.method === 'GET') return page();   // 言葉で頼む（つくる）だけ
   if (path === '/shelf/data' && req.method === 'GET') return json(await shelfData(gh));
   if (path === '/shelf/build' && req.method === 'GET' && !url.searchParams.has('id')) return buildPage();   // 組む（4つの口）の画面
   if (path === '/shelf/compose' && req.method === 'POST') {
@@ -185,7 +186,8 @@ export async function shelfRoute(req, env, gh, url) {
 const buildPage = () => new Response(BUILD_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' } });
 
 // ── 画面（仕事 → 組む → つくる → 道具箱 → 育てる）。見た目と動きは shelf_ui.js
-const page = () => new Response(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>仕事の棚</title><style>${CSS}</style></head><body><main>
-<div class="top"><h1>仕事の棚</h1><nav><button data-t="jobs" aria-pressed="true">仕事</button><a class="nl" href="/shelf/build">組む</a><button data-t="make" aria-pressed="false">つくる</button><button data-t="tools" aria-pressed="false">道具箱</button><button data-t="grow" aria-pressed="false">育てる</button></nav><span class="sp"></span><a href="/setup" class="mu">設定のページへ</a></div>
+const page = () => new Response(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>言葉で頼む</title><style>${CSS}</style></head><body><main>
+<div class="top"><h1>言葉で頼む</h1><nav><a class="nl" href="/shelf/build">組む</a><button data-t="make" aria-pressed="true">言葉で頼む</button></nav><span class="sp"></span><a href="/setup" class="mu">設定のページへ</a></div>
+<script>location.hash='make'</script>
 <div id="app" class="mu">読み込み中…</div></main><script>${JS}</script></body></html>`,
   { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' } });

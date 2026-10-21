@@ -121,7 +121,7 @@ function vMake(){const r=mk.rec,st=r&&r.状態;
  if(st==='提案できた')return[...head,proposalCard(r),msg];
  if(st==='開発中')return[...head,el('div',{class:'card wait'},el('span',{class:'dot'}),el('p',{text:'承認された内容で作っています（数分）。終わると、ここに結果が出ます。このページを閉じても続きます。'}))];
  if(st==='完成')return[...head,el('div',{class:'card'},el('h2',{text:'できました'}),el('div',{class:'ok',text:r.結果||'試し（影）で動きます。最初は外に出ません。'}),(r.作った部品||[]).length?sec('新しく作った道具（部品）',list(r.作った部品)):null,
-   el('div',{class:'row'},el('button',{class:'btn',onclick:()=>{view='jobs';cur=r.レシピID;sel=null;draw();scrollTo(0,0)},text:'できた仕事を見る'}),el('button',{class:'btn sub',onclick:()=>openMake(),text:'別の仕事を頼む'})))];
+   el('div',{class:'row'},el('button',{class:'btn',onclick:()=>{location.href='/shelf/build'},text:'できた仕事を見る'}),el('button',{class:'btn sub',onclick:()=>openMake(),text:'別の仕事を頼む'})))];
  return[...head,el('div',{class:'card'},el('h2',{text:st==='失敗'?'うまくいきませんでした':'この依頼は終わっています'}),el('p',{class:'warn',text:r.理由||''}),
    st==='失敗'&&r.提案?[el('label',{class:'field'},'直してほしい点（なくてもよい）',el('textarea',{class:'big',rows:3,oninput:ev=>{mk.fix=ev.target.value}},mk.fix)),el('div',{class:'row'},el('button',{class:'btn',disabled:mk.busy,onclick:()=>actBuild('/shelf/build/answer',{text:mk.fix.trim()||'もう一度、提案を作り直してください'}),text:'もう一度、提案してもらう'}),msg)]:el('div',{class:'row'},el('button',{class:'btn',onclick:()=>openMake(r.頼み),text:'同じ内容で頼み直す'}),msg))]}
 // ── 道具箱

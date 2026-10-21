@@ -116,7 +116,7 @@ const t=setInterval(async()=>{const p=await (await fetch('/setup/google/poll',{m
     ${nav}
     ${msg ? `<p class="${msg.startsWith('⚠') ? 'err' : 'muted'}">${esc(msg)}</p>` : ''}
     ${card}
-    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・棚（仕事を見る・言葉で頼んで作る・育てる）：<a href="${origin}/shelf">${origin}/shelf</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>
+    <p class="muted">指示を出すページ：<a href="${origin}/i">${origin}/i</a>・仕事を組む・頼む：<a href="${origin}/shelf/build">${origin}/shelf/build</a>・出来事の受け口（フォームなどからすぐ動かす）：<a href="${origin}/setup/hook">${origin}/setup/hook</a>（どれもこのページと同じログインで入れます）</p>
     ${bar}${script}`);
 }
 
@@ -278,7 +278,7 @@ async function hookPage(req, env, origin) {
     <div class="card"><b>送り先の住所</b><p class="code">${esc(origin)}/hook/<span>form</span></p><p class="muted">最後の「form」は知らせの種類の名前です。レシピの「きっかけ」の「から」と同じ名前にします。</p></div>
     <div class="card"><b>合言葉（署名の鍵）</b><p class="code">${esc(secret)}</p><p class="muted">送る側は、本文を HMAC-SHA256 で署名し、ヘッダー <code>x-orbit-signature</code> に入れます。署名がない知らせは受けません。同じ出来事を2回送っても、動くのは1回です（ヘッダー <code>x-orbit-event-id</code> に出来事の番号を入れます）。</p>
     ${env.HOOK_SECRET ? '' : '<form method="post"><input type="hidden" name="regen" value="1"><button class="sub">合言葉を作り直す（古い物は使えなくなります）</button></form>'}</div>
-    <p class="muted"><a href="/setup">← 設定のページへ</a>・<a href="/shelf">棚へ</a></p>`);
+    <p class="muted"><a href="/setup">← 設定のページへ</a>・<a href="/shelf/build">仕事を組む</a></p>`);
 }
 
 // ── 承認のページ（Discord の知らせのリンクから）
