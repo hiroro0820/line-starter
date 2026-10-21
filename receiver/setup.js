@@ -436,20 +436,35 @@ async function updatePage(req, env, gh, h, url) {
 }
 
 // 芯の更新を取り込む（ok）か見送る。リンクのボタンと Slack の ✅ ❌ のスタンプで共通（10/21）。{ title, html, text } を返す
-async function decideUpdate(env, gh, h, ver, ok) {
+async function decideUpdate(env, gh, h, ver, ok, later = null) {   // later：Slack のスタンプから（裏の作業は30秒で切れるので、置き直しは1分ごとの見回りに回す・10/21）
   const branch = `orbit-update/${h}`;
   if (!ok) { await env.CONFIG.put(`upd_no:${h}`, '1'); return { title: '❌ 見送りました', html: '<p class="muted">今の版のまま動きます。次の新しい版が出たら、また知らせます</p>', text: '今の版のまま動きます。次の新しい版が出たら、また知らせます' }; }
   const m = await gh('POST', '/merges', { base: 'main', head: branch, commit_message: `Orbit の更新（${ver}）を取り込む` });
   if (m.status !== 201 && m.status !== 204) { const why = m.status === 409 ? '芯のファイルが御社で書き換えられていて、ぶつかりました。担当者にお知らせください' : '少しして、もう一度押してください'; return { title: `取り込めませんでした（${m.status}）`, html: `<p class="muted">${why}</p>`, text: why }; }
   await gh('DELETE', `/git/refs/heads/${branch}`);
   const code = await env.CONFIG.get('code');   // 受け口（この画面の仕組み）も新しい版に：自分の鍵を受付に一度だけ見せて置き直してもらう（受付は鍵を残さない・10/21）
-  let rcv = '受け口（この画面）は今の版のままです。新しくするには、手引きの「Cloudflare で許可」をもう一度押してください';
-  if (env.ORBIT_CF_TOKEN && env.ONBOARD_API && code) {
-    const r = await fetch(new URL('/api/cf', env.ONBOARD_API), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redeploy: 1, t: code, token: env.ORBIT_CF_TOKEN }) }).catch(() => null);
-    const j = r ? await r.json().catch(() => ({})) : {};
-    rcv = j.ok ? '受け口（この画面）も新しい版に置き直しました' : `⚠ 受け口は置き直せませんでした（${j.error || (r && r.status) || '受付に届かない'}）。担当者にお知らせください`;
-  }
+  let rcv;
+  if (later && env.ORBIT_CF_TOKEN && env.ONBOARD_API && code) { await env.CONFIG.put('redeploy_pending', JSON.stringify(later)); rcv = '受け口（この画面）は1分ほどで新しい版に置き直します。済んだらこのスレッドに知らせます'; }
+  else rcv = await redeployReceiver(env, code);
   return { title: `✅ 新しい版（${esc(ver)}）を取り込みました`, html: `<p>${esc(rcv)}</p><p class="muted">会社の設定・custom/ は変えていません</p>`, text: `${rcv}（会社の設定・custom/ は変えていません）` };
+}
+
+// 受け口を今の版に置き直す（自分の鍵を受付に一度だけ見せる・受付は鍵を残さない）。結果の一文を返す
+async function redeployReceiver(env, code) {
+  if (!(env.ORBIT_CF_TOKEN && env.ONBOARD_API && code)) return '受け口（この画面）は今の版のままです。新しくするには、手引きの「Cloudflare で許可」をもう一度押してください';
+  const r = await fetch(new URL('/api/cf', env.ONBOARD_API), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redeploy: 1, t: code, token: env.ORBIT_CF_TOKEN }) }).catch(() => null);
+  const j = r ? await r.json().catch(() => ({})) : {};
+  return j.ok ? '受け口（この画面）も新しい版に置き直しました' : `⚠ 受け口は置き直せませんでした（${j.error || (r && r.status) || '受付に届かない'}）。担当者にお知らせください`;
+}
+// 1分ごとの見回りから：スタンプで取り込んだ後の置き直し（あれば）。結果は知らせのスレッドへ
+export async function pendingRedeploy(env) {
+  const p = env.CONFIG && await env.CONFIG.get('redeploy_pending', 'json');
+  if (!p) return null;
+  await env.CONFIG.delete('redeploy_pending');   // 先に消す（失敗しても繰り返さない）
+  const rcv = await redeployReceiver(env, await env.CONFIG.get('code'));
+  const c = await env.CONFIG.get('slack', 'json');
+  if (c && c.token && p.channel) await fetch('https://slack.com/api/chat.postMessage', { method: 'POST', headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ channel: p.channel, thread_ts: p.ts, text: rcv }) }).catch(() => { });
+  return rcv;
 }
 
 // 指示を1件受け付ける（指示のページ・Slack の #orbit から）。Issue にして instruct.yml を起こす。番号を返す（失敗は null）
@@ -500,7 +515,7 @@ async function reactionIn(m, c, env, ctx, gh, fetcher = fetch) {
     else {
       const cm = await gh('GET', `/contents/cloud/lines/core.json?ref=${encodeURIComponent(`orbit-update/${u[1]}`)}`);
       let ver = ''; try { ver = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cm.json.content).replace(/\s/g, '')), x => x.charCodeAt(0)))).version || ''; } catch { }
-      r = await decideUpdate(env, gh, u[1], ver, ok);
+      r = await decideUpdate(env, gh, u[1], ver, ok, { channel: c.channel, ts: m.ts });
     }
     await slack('chat.postMessage', { channel: c.channel, thread_ts: m.ts, text: `${r.title.replace(/<[^>]+>/g, '')}${r.text ? '\n' + r.text : ''}` });
   })();

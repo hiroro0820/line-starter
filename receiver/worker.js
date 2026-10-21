@@ -4,7 +4,7 @@
 // 置き方：リポジトリの .github/workflows/receiver.yml が自動で置く（お客様は Cloudflare の鍵をリポジトリに貼るだけ）。
 // 承認の状態＝Issue、途中の荷物＝GitHub の成果物。公開画像だけ KV（MEDIA）に置く。
 import { handle } from './handle.js';
-import { route, loggedIn, relayIn, coreUpdate, slackTidy } from './setup.js';
+import { route, loggedIn, relayIn, coreUpdate, slackTidy, pendingRedeploy } from './setup.js';
 import { onHook, retrying } from './events.js';
 import { Hub, hubOf } from './hub.js';
 import TRIGGERS_FILE from './triggers.json' with { type: 'json' };   // 出来事で起こすレシピの表（schedule.py triggers が書く）
@@ -94,6 +94,7 @@ export async function dispatchDue(env, now, gh = repoApi(env), opts = {}) {
 
 export default {
   async scheduled(event, env, ctx) {
+    ctx.waitUntil(pendingRedeploy(env).catch(() => { }));   // スタンプで取り込んだ後の受け口の置き直し（見回りは時間の制限がゆるい・10/21）
     ctx.waitUntil(dispatchDue(env, new Date(event.scheduledTime), undefined, { exact: event.cron === '* * * * *' }));   // 1分ごとの見回り（cron が * * * * *）なら1分単位・30分ごとの古い受け口は30分枠
     const jst = new Date(event.scheduledTime + 9 * 3600 * 1000), m = jst.getUTCMinutes();
     if (jst.getUTCHours() === 4 && (event.cron === '* * * * *' ? m === 10 : m < 30)) ctx.waitUntil(coreUpdate(env).catch(() => { }));   // 毎日 4:10 に芯の新しい版を確かめる（10/21）
