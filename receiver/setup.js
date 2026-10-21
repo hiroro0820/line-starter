@@ -95,14 +95,14 @@ function view(s, origin, msg = '', want = '') {
     { id: 'notify', title: s.oauth ? '知らせの先' : `知らせの先（${where}）`, must: true, ok: has(hookKey) || (slack && has('SLACK_BOT_TOKEN')), body: s.oauth ? connectButtons : keyForm('notify', hook, '入れて、試しの知らせを送る'), test: slack && has('SLACK_BOT_TOKEN') ? `Slack に #${esc(s.slack_channel || 'orbit')} を作って、試しの知らせを送りました。届いているか見てください` : `試しの知らせを送りました。${where} に「つながりました」が届いているか見てください` },
     { id: 'claude', title: 'Claude の鍵', must: true, ok: claudeOk, body: keyForm('claude', claude, '入れる'), test: '鍵の形を確かめました（本当に動くかは、最後の仕上げの診断で確かめます）' },
     { id: 'extras', title: 'SNS とメール', must: false, ok: has('BUFFER_API_KEY') || has('MAIL_PASSWORD'), body: keyForm('extras', extras, '入れる'), test: '入れました' },
-    { id: 'finish', title: '仕上げ', must: true, ok: !!s.finished, body: finish, test: `診断を流しました。結果は ${where} に届きます` },
+    { id: 'finish', title: '仕上げ', must: true, ok: !!s.finished, body: finish, test: '' },   // 仕上げの欄の上に「診断を流しました」があるので、下には出さない（10/21：更新のボタンの下に出て、更新の結果と紛らわしかった）
   ];
   const ix = Math.max(0, steps.findIndex(x => x.id === want) >= 0 ? steps.findIndex(x => x.id === want) : steps.findIndex(x => x.must && !x.ok) >= 0 ? steps.findIndex(x => x.must && !x.ok) : steps.length - 1);
   const cur = steps[ix], next = steps[ix + 1], prev = steps[ix - 1];
   const musts = steps.filter(x => x.must), doneN = musts.filter(x => x.ok).length, pct = Math.round(doneN / musts.length * 100);
   const nav = `<ol class="steps"><li class="done"><span>✓</span>はじめに（2段階認証・Cloudflare で許可）</li>${steps.map((x, i) =>
     `<li class="${x.ok ? 'done' : ''} ${i === ix ? 'cur' : ''}"><a href="/setup?step=${x.id}"><span>${x.ok ? '✓' : i + 1}</span>${x.title}${x.must ? '' : '<small>（使う会社だけ）</small>'}</a></li>`).join('')}</ol>`;
-  const test = cur.ok ? `<p class="pass">✓ 確かめました：${cur.test}</p>` : '';
+  const test = cur.ok && cur.test ? `<p class="pass">✓ 確かめました：${cur.test}</p>` : '';
   const moves = `<div class="row moves">${prev ? `<a class="btn sub" href="/setup?step=${prev.id}">← 前へ</a>` : ''}${next
     ? (cur.ok || !cur.must ? `<a class="btn" href="/setup?step=${next.id}">${cur.ok ? '次へ' : '使わない（飛ばす）'} →</a>` : `<span class="muted">この手順が済むと「次へ」が出ます</span>`) : ''}</div>`;
   const card = `<section class="card ${cur.ok ? 'ok' : ''}"><h2><span class="n">${cur.ok ? '✓' : ix + 1}</span>${cur.title}${cur.ok ? '<span class="tag">済み</span>' : ''}</h2>${cur.body}${test}${moves}</section>`;
