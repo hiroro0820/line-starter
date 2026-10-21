@@ -47,11 +47,24 @@ export async function loggedIn(env, req) {
   const c = /(?:^|;\s*)setup=([^;]+)/.exec(req.headers.get('cookie') || '');
   return !!c && same(c[1], await hmac(await sessionKey(env), 'setup'));
 }
-const loginCookie = async env => `setup=${await hmac(await sessionKey(env), 'setup')}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`;
+const loginCookie = async env => `setup=${await hmac(await sessionKey(env), 'setup')}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=34560000`;   // 400日（ブラウザの上限）。開くたびに延ばす（route）ので、使っている端末では切れない（10/21 オーナー：仕上げ後は認証なしで触れるように）
 async function tell(env, event, extra = {}) {   // 担当者に進み具合を知らせる（失敗しても導入は止めない）
   const code = await env.CONFIG.get('code');
   if (!code || !env.ONBOARD_API) return;
   try { await fetch(env.ONBOARD_API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ t: code, event, ...extra }) }); } catch { }
+}
+
+// ── 入口のリンク（10/21 オーナー：設定やログインはめんどう）。知らせの先（Slack・Discord）にいる人＝会社の人なので、そこに置いたリンクから入れる。
+// 一度開いた端末は 400 日入ったまま（開くたびに延びる）。作り直すと古いリンクは使えない
+async function postEntry(env, origin, renew = false) {
+  let k = renew ? '' : await env.CONFIG.get('entry_key');
+  if (!k) { k = random(24); await env.CONFIG.put('entry_key', k); }
+  const link = `${origin}/e/${k}`, text = `📌 Orbit Package の入口：仕事を組む・頼む → ${link}\nこのリンクから開くと、ログインなしで入れます（一度開いた端末は、そのあと直接開いても入れます）。社外の人には見せないでください`;
+  const c = await env.CONFIG.get('slack', 'json'), sh = await env.CONFIG.get('slack_hook'), dh = await env.CONFIG.get('discord_hook');
+  const post = (u, body, h = {}) => fetch(u, { method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8', ...h }, body: JSON.stringify(body) }).then(async r => r.ok && (r.status === 204 || (await r.json().catch(() => ({ ok: true }))).ok !== false)).catch(() => false);
+  const sent = c && c.token ? await post('https://slack.com/api/chat.postMessage', { channel: c.channel, text }, { authorization: `Bearer ${c.token}` })
+    : sh ? await post(sh, { text }) : dh ? await post(dh, { content: text }) : false;
+  return sent ? '知らせの先に、新しい入口のリンクを送りました' + (renew ? '（前のリンクは使えなくなりました）' : '') : '⚠ 知らせの先に送れませんでした。知らせの先をつなぎ直してから、もう一度押してください';
 }
 
 // ── Slack でログイン（10/21 オーナー：新しく入れる物を増やさない）。知らせの先の Slack に、15分・1回だけのリンクを送る。
@@ -147,7 +160,7 @@ function view(s, origin, msg = '', want = '') {
     <details><summary>メールの「アプリ パスワード」の出し方（3分）</summary><ol><li>https://myaccount.google.com/apppasswords を開く（2段階認証が要ります）</li><li>名前に「AI の係」と入れて作成 → 出た16文字を下に貼る</li></ol></details>
     ${field('MAIL_USER', '使うメールアドレス', 'example@gmail.com', 'email')}${field('MAIL_PASSWORD', 'アプリ パスワード（16文字）', '', 'password')}`;
   const ready = s.github && s.draft;
-  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form><p class="muted">仕組みの新しい版は毎日 4:10 に確かめます。互換の確かめが通ると、知らせの先に「✅ 取り込む」のリンクが届きます</p><form method="post" action="/setup/update"><button class="sub">今すぐ新しい版を確かめる</button></form>`
+  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form><p class="muted">仕組みの新しい版は毎日 4:10 に確かめます。互換の確かめが通ると、知らせの先に「✅ 取り込む」のリンクが届きます</p><form method="post" action="/setup/update"><button class="sub">今すぐ新しい版を確かめる</button></form><p class="muted">知らせの先に「📌 入口」のリンクがあります。そこから開くと、どの端末でもログインなしで入れます</p><form method="post" action="/setup/entry"><button class="sub">入口のリンクを作り直して送る（前のリンクは使えなくなります）</button></form>`
     : ready ? `<p>押すと、会社の設定とレシピを入れ、正しく動くかを診断します（結果は ${where} へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">GitHub${s.auto ? '' : 'と導入コード'}が済むと押せます</p>`;
   const claudeOk = has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY');
   // 手順（must＝必須）。ok はその手順の確かめが通ったか、test は通ったときに出す一言
@@ -281,14 +294,14 @@ async function saveSecrets(env, gh, f) {
     if (!/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/.test(f.DISCORD_WEBHOOK_URL)) bad.push('Discord のウェブフック URL の形が違います');
     else {
       const r = await fetch(f.DISCORD_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '✅ Orbit Package とつながりました。知らせと承認はこのチャンネルに届きます' }) });
-      if (r.status === 204 || r.status === 200) await put('DISCORD_WEBHOOK_URL', f.DISCORD_WEBHOOK_URL); else bad.push(`Discord に送れませんでした（${r.status}）。URL を確かめてください`);
+      if (r.status === 204 || r.status === 200) { await put('DISCORD_WEBHOOK_URL', f.DISCORD_WEBHOOK_URL); await env.CONFIG.put('discord_hook', f.DISCORD_WEBHOOK_URL); } else bad.push(`Discord に送れませんでした（${r.status}）。URL を確かめてください`);
     }
   }
   if (f.SLACK_WEBHOOK_URL) {
     if (!/^https:\/\/hooks\.slack\.com\/services\/[\w-]+\/[\w-]+\/[\w-]+$/.test(f.SLACK_WEBHOOK_URL)) bad.push('Slack の Webhook URL の形が違います（https://hooks.slack.com/services/… で始まります）');
     else {
       const r = await fetch(f.SLACK_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '✅ Orbit Package とつながりました。知らせと承認のリンクはこのチャンネルに届きます' }) });
-      if (r.status === 200) await put('SLACK_WEBHOOK_URL', f.SLACK_WEBHOOK_URL); else bad.push(`Slack に送れませんでした（${r.status}）。URL を確かめてください`);
+      if (r.status === 200) { await put('SLACK_WEBHOOK_URL', f.SLACK_WEBHOOK_URL); await env.CONFIG.put('slack_hook', f.SLACK_WEBHOOK_URL); } else bad.push(`Slack に送れませんでした（${r.status}）。URL を確かめてください`);
     }
   }
   if (f.BUFFER_API_KEY) await put('BUFFER_API_KEY', f.BUFFER_API_KEY);
@@ -331,6 +344,7 @@ async function finish(env, gh, origin) {
   if (r.status !== 204) return `⚠ 仕上げを始められませんでした（${r.status}）。少しして、もう一度押してください`;
   const st = await mark(env, { finished: true });
   await tell(env, 'setup', { repo: st.repo, url: origin, secrets: st.secrets, google: !!st.google });
+  await postEntry(env, origin);
   return '仕上げを始めました（数分）。結果は知らせの先（Slack か Discord）に届きます';
 }
 
@@ -527,17 +541,23 @@ async function notifyPut(req, env, gh) {
     await env.CONFIG.put('slack', JSON.stringify({ token: b.token, channel: b.channel, relay_key: String(b.relay_key || '') }));   // #orbit の書き込みを指示として受ける（受付からの合言葉つき）
     await mark(env, { slack_channel: b.channel_name || '', secrets: [...new Set([...(await state(env)).secrets, 'SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID'])] });
     await tell(env, 'notify', { svc: 'slack' });
+    await postEntry(env, new URL(req.url).origin);
     return Response.json({ ok: true, msg: '入れました：2件' });
   }
   const msg = await saveSecrets(env, gh, { [b.svc === 'slack' ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL']: b.url });
   const ok = !!msg && !msg.startsWith('⚠');
-  if (ok) await tell(env, 'notify', { svc: b.svc });
+  if (ok) { await tell(env, 'notify', { svc: b.svc }); await postEntry(env, new URL(req.url).origin); }
   return Response.json({ ok, msg: msg || '入りませんでした' });
 }
 
-export async function route(req, env) {
+export async function route(req, env) {   // 入った端末は、開くたびにログインの期限を延ばす（10/21）
+  const r = await routeInner(req, env);
+  if (!r || r.headers.has('set-cookie') || req.method !== 'GET' || !(await loggedIn(env, req).catch(() => false))) return r;
+  const out = new Response(r.body, r); out.headers.append('set-cookie', await loginCookie(env)); return out;
+}
+async function routeInner(req, env) {
   const url = new URL(req.url), path = url.pathname, origin = url.origin;
-  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || path === '/shelf' || path.startsWith('/shelf/') || (path === '/m' && req.method === 'POST'))) return null;
+  if (!(path === '/setup' || path.startsWith('/setup/') || path === '/i' || /^\/a\/\d+$/.test(path) || /^\/u\/[0-9a-f]{12}$/.test(path) || /^\/e\/[A-Za-z0-9_-]{20,64}$/.test(path) || path === '/shelf' || path.startsWith('/shelf/') || (path === '/m' && req.method === 'POST'))) return null;
   if (!env.CONFIG) return page('設定', '<h1>置き場（CONFIG）がありません</h1><p class="muted">担当者からのリンクを開き、「Cloudflare で許可」をもう一度押してください</p>');
   const gh = repoApi(env);
   if (path === '/m') {   // 画像の置き場（Actions から。承認の鍵で確かめる）
@@ -563,6 +583,8 @@ export async function route(req, env) {
     await env.CONFIG.delete('login_token');
     return go('/setup', await loginCookie(env));
   }
+  const e = /^\/e\/([A-Za-z0-9_-]{20,64})$/.exec(path);   // 入口のリンク（知らせの先の Slack・Discord に置く）：押すとログインなしで組む画面へ（10/21 オーナー）
+  if (e) { const k = await env.CONFIG.get('entry_key'); return k && same(e[1], k) ? go('/shelf/build', await loginCookie(env)) : login('この入口のリンクは古くなっています。知らせの先の新しいリンクから開いてください'); }
   if (path === '/setup/login/slack') return slackLogin(req, env, url, origin);   // Slack にログインのリンクを送る・そのリンクで入る（10/21）
   if (path === '/setup/login/google') return googleLoginStart(req, env, url);   // Google でログイン（受付を通る・10/21）
   if (path === '/setup/login/google/back') return googleLoginBack(req, env, url, origin);
@@ -608,11 +630,12 @@ export async function route(req, env) {
     if (path === '/setup/secrets' && req.method === 'POST') msg = await saveSecrets(env, gh, await form(req));
     if (path === '/setup/draft' && req.method === 'POST') msg = await importDraft(env, gh, (await form(req)).code || '');
     if (path === '/setup/finish' && req.method === 'POST') msg = await finish(env, gh, origin);
+    if (path === '/setup/entry' && req.method === 'POST') msg = await postEntry(env, origin, true);   // 入口のリンクを作り直して送り直す（古いリンクは使えなくなる）
     if (path === '/setup/update' && req.method === 'POST') {   // 今すぐ芯の更新を確かめる（ふだんは毎日 4:10 に受け口が自分で見る）
       const r = await coreUpdate(env, gh);
       msg = { checking: `新しい版（${r.version}）の互換の確かめを始めました。通れば知らせの先に「✅ 取り込む」のリンクが届きます`, same: `最新の版です（${r.version}）`, pending: `新しい版（${r.version}）は確かめ中か、✅ を待っています（知らせの先のリンクから）`, reminded: `新しい版（${r.version}）をもう一度確かめて、知らせ直します`, declined: `新しい版（${r.version}）は見送りにしています` }[r.state] || `⚠ ${r.msg}`;
     }
   } catch (e) { msg = `⚠ ${String(e.message || e).slice(0, 200)}`; }
-  const want = url.searchParams.get('step') || { '/setup/github/back': 'github', '/setup/github/installed': 'github', '/setup/draft': 'draft', '/setup/finish': 'finish', '/setup/update': 'finish' }[path] || '';   // 押した手順をそのまま見せる（確かめの結果と「次へ」）
+  const want = url.searchParams.get('step') || { '/setup/github/back': 'github', '/setup/github/installed': 'github', '/setup/draft': 'draft', '/setup/finish': 'finish', '/setup/update': 'finish', '/setup/entry': 'finish' }[path] || '';   // 押した手順をそのまま見せる（確かめの結果と「次へ」）
   return view(await viewState(env), origin, msg, want);
 }
