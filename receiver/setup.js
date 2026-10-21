@@ -356,7 +356,14 @@ async function updatePage(req, env, gh, h, url) {
     const m = await gh('POST', '/merges', { base: 'main', head: branch, commit_message: `Orbit の更新（${ver}）を取り込む` });
     if (m.status !== 201 && m.status !== 204) return page('更新', `<h1>取り込めませんでした（${m.status}）</h1><p class="muted">${m.status === 409 ? '芯のファイルが御社で書き換えられていて、ぶつかりました。担当者にお知らせください' : '少しして、もう一度押してください'}</p>`);
     await gh('DELETE', `/git/refs/heads/${branch}`);
-    return page('更新', `<h1>✅ 新しい版（${esc(ver)}）を取り込みました</h1><p class="muted">受け口と表を置き直しています（数分）。会社の設定・custom/ は変えていません</p>`);
+    const code = await env.CONFIG.get('code');   // 受け口（この画面の仕組み）も新しい版に：自分の鍵を受付に一度だけ見せて置き直してもらう（受付は鍵を残さない・10/21）
+    let rcv = '受け口（この画面）は今の版のままです。新しくするには、手引きの「Cloudflare で許可」をもう一度押してください';
+    if (env.ORBIT_CF_TOKEN && env.ONBOARD_API && code) {
+      const r = await fetch(new URL('/api/cf', env.ONBOARD_API), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redeploy: 1, t: code, token: env.ORBIT_CF_TOKEN }) }).catch(() => null);
+      const j = r ? await r.json().catch(() => ({})) : {};
+      rcv = j.ok ? '受け口（この画面）も新しい版に置き直しました' : `⚠ 受け口は置き直せませんでした（${esc(j.error || (r && r.status) || '受付に届かない')}）。担当者にお知らせください`;
+    }
+    return page('更新', `<h1>✅ 新しい版（${esc(ver)}）を取り込みました</h1><p>${rcv}</p><p class="muted">会社の設定・custom/ は変えていません</p>`);
   }
   return page('更新', `<h1>Orbit の新しい版（${esc(ver)}）</h1><p>互換の確かめ（全部のレシピの組み立てとテスト）は通っています。取り込むのは仕組みの決まったファイルだけで、会社の設定・custom/・記録には触りません。</p>
     <form method="post" class="row"><button name="ok" value="true">✅ 取り込む</button><button name="ok" value="false" class="sub">❌ 見送る</button></form>`);
