@@ -84,7 +84,7 @@ function view(s, origin, msg = '', want = '') {
     <details><summary>メールの「アプリ パスワード」の出し方（3分）</summary><ol><li>https://myaccount.google.com/apppasswords を開く（2段階認証が要ります）</li><li>名前に「AI の係」と入れて作成 → 出た16文字を下に貼る</li></ol></details>
     ${field('MAIL_USER', '使うメールアドレス', 'example@gmail.com', 'email')}${field('MAIL_PASSWORD', 'アプリ パスワード（16文字）', '', 'password')}`;
   const ready = s.github && s.draft;
-  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form>`
+  const finish = s.finished ? `<p class="muted">診断を流しました。結果は ${where} に届きます。最初の1週間は試し（書き込まない・送らない）で動きます</p><form method="post" action="/setup/finish"><button class="sub">もう一度、仕上げと診断を流す</button></form><p class="muted">仕組みの新しい版は毎日 4:10 に確かめます。互換の確かめが通ると、知らせの先に「✅ 取り込む」のリンクが届きます</p><form method="post" action="/setup/update"><button class="sub">今すぐ新しい版を確かめる</button></form>`
     : ready ? `<p>押すと、会社の設定とレシピを入れ、正しく動くかを診断します（結果は ${where} へ）</p><form method="post" action="/setup/finish"><button>仕上げる</button></form>` : `<p class="muted">GitHub${s.auto ? '' : 'と導入コード'}が済むと押せます</p>`;
   const claudeOk = has('CLAUDE_CODE_OAUTH_TOKEN') || has('ANTHROPIC_API_KEY');
   // 手順（must＝必須）。ok はその手順の確かめが通ったか、test は通ったときに出す一言
@@ -250,7 +250,8 @@ async function importDraft(env, gh, code) {
   const bj = await b.json().catch(() => ({}));
   if (!b.ok || !bj.files) return `⚠ ${bj.error || '仕組みの中身を受け取れませんでした。担当者にお知らせください'}`;
   if (bj.google_client_secret) await env.CONFIG.put('google_client_secret', bj.google_client_secret);   // Google の合言葉（設定ファイルは上書きしない）
-  const files = { ...bj.files, 'cloud/lines/draft.json': { mode: '100644', content: JSON.stringify(j.setup, null, 1) + '\n' } };
+  const again = !!(await state(env)).draft;   // 2回目の取り込み：会社の設定・custom/ は上書きしない（10/21 t4：company.json が雛形に戻った）
+  const files = { ...(again ? coreFiles(bj.files) : bj.files), 'cloud/lines/core.json': coreMark(bj), 'cloud/lines/draft.json': { mode: '100644', content: JSON.stringify(j.setup, null, 1) + '\n' } };
   await commitFiles(gh, files, `仕組みの中身（${bj.version || ''}）と担当者の下書きを取り込む`);
   await env.CONFIG.put('code', code);
   let sharing = false;   // 毎晩の共有（share.yml）が大元へ申し出るための印。失敗しても導入は止めない（共有だけ使えない）
@@ -302,6 +303,65 @@ async function approval(req, env, gh, n, url) {
 }
 
 // ── 指示のページ
+// 芯の更新（10/21）：受付の束が新しい版なら、芯だけを枝 orbit-update/<印> に書き、その枝で互換の確かめ（compat.yml）を起こす。
+// 通れば知らせの先に「新しい版があります」と /u/<印> のリンクが届き、お客様が ✅ を押すと main に取り込む（App の権限にプルリクエストがないので PR は使わない）
+// お客様の物（会社の設定・custom/・案内の文）には触らない。今の版の印は cloud/lines/core.json
+const OWN = [/^cloud\/lines\/company\.json$/, /^cloud\/lines\/custom\//, /^CLAUDE\.md$/, /^README\.md$/, /^\.gitignore$/, /^\.dev\.vars\.example$/];
+export const coreFiles = files => Object.fromEntries(Object.entries(files || {}).filter(([p]) => !OWN.some(r => r.test(p))));
+const coreMark = b => ({ mode: '100644', content: JSON.stringify({ version: b.version || '', hash: b.hash || '' }, null, 1) + '\n' });
+export async function coreUpdate(env, gh = repoApi(env), fetcher = fetch) {
+  const code = env.CONFIG && await env.CONFIG.get('code');
+  if (!code || !env.ONBOARD_API) return { state: 'skip', msg: '導入コードか受付の住所がありません' };
+  const q = `${env.ONBOARD_API}?t=${encodeURIComponent(code)}&bundle=1`;
+  const v = await (await fetcher(q + '&v=1')).json().catch(() => ({}));
+  if (!v.hash) return { state: 'error', msg: v.error || '受付から版を受け取れませんでした' };
+  const cur = await gh('GET', '/contents/cloud/lines/core.json');
+  let now = {}; try { if (cur.status === 200) now = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cur.json.content).replace(/\s/g, '')), c => c.charCodeAt(0)))); } catch { }
+  if (now.hash === v.hash) return { state: 'same', version: v.version };
+  const h = v.hash.slice(0, 12), branch = `orbit-update/${h}`, t = Date.now();
+  const check = () => gh('POST', '/actions/workflows/compat.yml/dispatches', { ref: branch });   // 枝の中の新しい compat.yml で確かめる
+  if ((await gh('GET', `/git/ref/heads/${branch}`)).status === 200) {   // この版はもう枝がある：確かめ中・✅ 待ち・見送り
+    if (await env.CONFIG.get(`upd_no:${h}`)) return { state: 'declined', version: v.version };
+    const at = Number(await env.CONFIG.get(`upd_at:${h}`) || 0);
+    if (t - at < 3 * 86400 * 1000) return { state: 'pending', version: v.version };
+    await check(); await env.CONFIG.put(`upd_at:${h}`, String(t));   // 3日押されていなければ、確かめ直して知らせ直す
+    return { state: 'reminded', version: v.version };
+  }
+  const b = await (await fetcher(q)).json().catch(() => ({}));
+  if (!b.files || b.hash !== v.hash) return { state: 'error', msg: b.error || '受付から中身を受け取れませんでした' };
+  const main = await gh('GET', '/git/ref/heads/main');
+  if (main.status !== 200) return { state: 'error', msg: `今の版を読めませんでした（${main.status}）` };
+  const mk = await gh('POST', '/git/refs', { ref: `refs/heads/${branch}`, sha: main.json.object.sha });
+  if (mk.status !== 201) return { state: 'error', msg: `更新の枝を作れませんでした（${mk.status}）` };
+  await commitFiles(gh, { ...coreFiles(b.files), 'cloud/lines/core.json': coreMark(b) }, `Orbit の更新（${b.version}）`, branch);
+  const d = await check();
+  if (d.status !== 204) return { state: 'error', msg: `互換の確かめを起こせませんでした（${d.status}）` };
+  await env.CONFIG.put(`upd_at:${h}`, String(t));
+  return { state: 'checking', version: b.version };
+}
+
+// 更新のページ /u/<印>?s=<署名>（知らせのリンクから）。✅ で枝を main に取り込む（受け口と表は main への書き込みで自動で置き直る）・❌ で見送る
+export const updatePageFor = (req, env, gh, h) => updatePage(req, env, gh, h, new URL(req.url));   // テスト用の入口
+async function updatePage(req, env, gh, h, url) {
+  const key = await env.CONFIG.get('approve_key');
+  if (!key || !same(url.searchParams.get('s') || '', await hmac(key, `u:${h}`))) return page('更新', '<h1>このリンクは使えません</h1><p class="muted">知らせの中のリンクから開いてください</p>');
+  const branch = `orbit-update/${h}`;
+  const ref = await gh('GET', `/git/ref/heads/${branch}`);
+  if (ref.status !== 200) return page('更新', '<h1>この版はもう取り込み済みか、なくなっています</h1>');
+  const cm = await gh('GET', `/contents/cloud/lines/core.json?ref=${encodeURIComponent(branch)}`);
+  let ver = ''; try { ver = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cm.json.content).replace(/\s/g, '')), c => c.charCodeAt(0)))).version || ''; } catch { }
+  if (req.method === 'POST') {
+    const ok = (await form(req)).ok === 'true';
+    if (!ok) { await env.CONFIG.put(`upd_no:${h}`, '1'); return page('更新', `<h1>❌ 見送りました</h1><p class="muted">今の版のまま動きます。次の新しい版が出たら、また知らせます</p>`); }
+    const m = await gh('POST', '/merges', { base: 'main', head: branch, commit_message: `Orbit の更新（${ver}）を取り込む` });
+    if (m.status !== 201 && m.status !== 204) return page('更新', `<h1>取り込めませんでした（${m.status}）</h1><p class="muted">${m.status === 409 ? '芯のファイルが御社で書き換えられていて、ぶつかりました。担当者にお知らせください' : '少しして、もう一度押してください'}</p>`);
+    await gh('DELETE', `/git/refs/heads/${branch}`);
+    return page('更新', `<h1>✅ 新しい版（${esc(ver)}）を取り込みました</h1><p class="muted">受け口と表を置き直しています（数分）。会社の設定・custom/ は変えていません</p>`);
+  }
+  return page('更新', `<h1>Orbit の新しい版（${esc(ver)}）</h1><p>互換の確かめ（全部のレシピの組み立てとテスト）は通っています。取り込むのは仕組みの決まったファイルだけで、会社の設定・custom/・記録には触りません。</p>
+    <form method="post" class="row"><button name="ok" value="true">✅ 取り込む</button><button name="ok" value="false" class="sub">❌ 見送る</button></form>`);
+}
+
 // 指示を1件受け付ける（指示のページ・Slack の #orbit から）。Issue にして instruct.yml を起こす。番号を返す（失敗は null）
 export async function addInstruction(gh, text, by = 'ページ') {
   const iss = await gh('POST', '/issues', { title: `📝 ${text.split('\n')[0].slice(0, 80)}`, body: `${text}\n<!-- by:${by} -->`, labels: ['指示'] });
@@ -388,6 +448,8 @@ export async function route(req, env) {
   if (path === '/setup/notify/put' && req.method === 'POST') return notifyPut(req, env, gh);   // 受付から（ログインの印はない。一度きりの印で確かめる）
   const a = /^\/a\/(\d+)$/.exec(path);
   if (a) return approval(req, env, gh, Number(a[1]), url);
+  const u = /^\/u\/([0-9a-f]{12})$/.exec(path);
+  if (u) return updatePage(req, env, gh, u[1], url);   // 芯の更新の ✅ ❌（知らせのリンクから・署名つき・10/21）
   if (path === '/setup' && url.searchParams.get('login')) {   // 受付が作ったログインの印つきのリンク（B の形）。1回使ったら消す（10/19：期限なしで使い回せた）。入り直しは「Cloudflare で許可」をもう一度押すと新しい印が入る
     if (await loggedIn(env, req)) return go('/setup');   // もう入っている（「進まないときは押す」を2回押したときなど）
     const t = await env.CONFIG.get('login_token');
@@ -437,7 +499,11 @@ export async function route(req, env) {
     if (path === '/setup/secrets' && req.method === 'POST') msg = await saveSecrets(env, gh, await form(req));
     if (path === '/setup/draft' && req.method === 'POST') msg = await importDraft(env, gh, (await form(req)).code || '');
     if (path === '/setup/finish' && req.method === 'POST') msg = await finish(env, gh, origin);
+    if (path === '/setup/update' && req.method === 'POST') {   // 今すぐ芯の更新を確かめる（ふだんは毎日 4:10 に受け口が自分で見る）
+      const r = await coreUpdate(env, gh);
+      msg = { checking: `新しい版（${r.version}）の互換の確かめを始めました。通れば知らせの先に「✅ 取り込む」のリンクが届きます`, same: `最新の版です（${r.version}）`, pending: `新しい版（${r.version}）は確かめ中か、✅ を待っています（知らせの先のリンクから）`, reminded: `新しい版（${r.version}）をもう一度確かめて、知らせ直します`, declined: `新しい版（${r.version}）は見送りにしています` }[r.state] || `⚠ ${r.msg}`;
+    }
   } catch (e) { msg = `⚠ ${String(e.message || e).slice(0, 200)}`; }
-  const want = url.searchParams.get('step') || { '/setup/github/back': 'github', '/setup/github/installed': 'github', '/setup/draft': 'draft', '/setup/finish': 'finish' }[path] || '';   // 押した手順をそのまま見せる（確かめの結果と「次へ」）
+  const want = url.searchParams.get('step') || { '/setup/github/back': 'github', '/setup/github/installed': 'github', '/setup/draft': 'draft', '/setup/finish': 'finish', '/setup/update': 'finish' }[path] || '';   // 押した手順をそのまま見せる（確かめの結果と「次へ」）
   return view(await viewState(env), origin, msg, want);
 }
