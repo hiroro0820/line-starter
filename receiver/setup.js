@@ -138,7 +138,9 @@ function view(s, origin, msg = '', want = '') {
     ? `<p>ボタンを押すと GitHub が開きます。GitHub のアカウントでログイン（なければ「Continue with Google」で作る）→ 本人確認でメールに届くコードを入れる →「Create GitHub App」→「Install」→「Authorize」の順に押してください。御社の GitHub に非公開のリポジトリができ、仕組みの中身が入ります（3分）</p><form method="post" action="/setup/github"><button>GitHub につなぐ</button></form>`
     : `<p>ボタンを押すと GitHub が開きます。「Create GitHub App」→ このリポジトリだけを選んで「Install」を押してください（1分）</p><form method="post" action="/setup/github"><button>GitHub につなぐ</button></form>`;
   const draft = s.draft ? `<p class="muted">${esc(s.company || '')} の設定を取り込みました</p>` : `<p>担当者からお送りした「導入コード」を入れてください</p><form method="post" action="/setup/draft" class="row"><input name="code" required placeholder="例：2IhxierPpcuc" autocomplete="off"><button>取り込む</button></form>`;
-  const google = s.google ? `<p class="muted">台帳（Google スプレッドシート）を作りました。<a href="https://docs.google.com/spreadsheets/d/${esc(s.sheet)}/edit" target="_blank" rel="noopener">開く</a></p>`
+  const calOk = /calendar/.test(s.google_scopes || '');
+  const webLink = `<p class="muted">${calOk ? 'Google カレンダーを読む許可も入っています。' : 'Google カレンダーを使う仕事があるときは、こちらで許可し直します（ブラウザで「許可」を押すだけ・1分）：'}</p><p><a class="btn ${calOk ? 'sub' : ''}" href="/setup/google/web?p=calendar">${calOk ? 'Google の許可をやり直す' : 'Google で許可（カレンダーも）'}</a></p>`;
+  const google = s.google ? `<p class="muted">台帳（Google スプレッドシート）を作りました。<a href="https://docs.google.com/spreadsheets/d/${esc(s.sheet)}/edit" target="_blank" rel="noopener">開く</a></p>${webLink}`
     : `<p>ボタンを押すとコードが出ます。Google の画面にそのコードを入れて「許可」を押してください。この仕組みが作るシートだけを使い、ほかのファイルは見ません（1分）</p><button id="g" type="button">Google で許可</button><div id="gout" class="muted"></div>`;
   const field = (name, label, hint, type = 'text') => has(name) ? `<p class="muted">${label}：入っています（変えるときだけ入れ直す）</p><label>${label}<input name="${name}" type="${type}" autocomplete="off"></label>` : `<label>${label}<input name="${name}" type="${type}" autocomplete="off" placeholder="${esc(hint)}"></label>`;
   const slack = s.notify === 'slack', where = slack ? 'Slack' : 'Discord', hookKey = slack ? 'SLACK_WEBHOOK_URL' : 'DISCORD_WEBHOOK_URL';
@@ -267,6 +269,55 @@ async function googleStart(env) {
   if (!r.ok) return { error: `Google の準備に失敗しました（${j.error || r.status}）` };
   await env.CONFIG.put('gdev', j.device_code, { expirationTtl: j.expires_in || 1800 });
   return { user_code: j.user_code, verification_url: j.verification_url || j.verification_uri, interval: j.interval || 5 };
+}
+// ── Google で許可（Web の方式・10/22）：カレンダーなどの範囲はデバイスコードの方式ではもらえないので、ブラウザで許可する。
+// 戻り先は受付（orbit-package.com/api/google）が受け、code をこの受け口へ渡す。code を鍵に換えるのはここだけ（PKCE の code_verifier はこの置き場にしかない）。鍵は御社の GitHub の秘密の設定へ
+const GOOGLE_WEB_REDIRECT = 'https://orbit-package.com/api/google';
+async function googleWebConf(env) {
+  let c = await env.CONFIG.get('google_web', 'json');
+  if (c && c.id && c.secret) return c;
+  const code = await env.CONFIG.get('code');
+  if (!code || !env.ONBOARD_API) return null;
+  const r = await fetch(`${env.ONBOARD_API}?t=${encodeURIComponent(code)}&google=1`).catch(() => null);
+  const j = r ? await r.json().catch(() => ({})) : {};
+  if (!j.google_web_client_id || !j.google_web_client_secret) return null;
+  c = { id: j.google_web_client_id, secret: j.google_web_client_secret };
+  await env.CONFIG.put('google_web', JSON.stringify(c));
+  return c;
+}
+export async function googleWebStart(env, url) {
+  const code = await env.CONFIG.get('code');
+  if (!code || !env.ONBOARD_API) return { error: '導入コードがまだありません。先に設定のページの手順を進めてください' };
+  if (!(await googleWebConf(env))) return { error: 'Google の許可（Web の方式）はまだ準備中です。担当者にお知らせください' };
+  const p = ['base', 'calendar', 'calendar_write'].includes(url.searchParams.get('p')) ? url.searchParams.get('p') : 'calendar';
+  const st = random(18), verifier = random(48);
+  const challenge = b64u(await crypto.subtle.digest('SHA-256', enc.encode(verifier)));
+  await env.CONFIG.put('gweb:' + st, JSON.stringify({ v: verifier, p }), { expirationTtl: 600 });
+  return { to: `${new URL(env.ONBOARD_API).origin}/api/google?t=${encodeURIComponent(code)}&s=${st}&c=${challenge}&p=${p}` };
+}
+export async function googleWebBack(env, gh, url, fetcher = fetch) {
+  const st = url.searchParams.get('s') || '';
+  const rec = /^[A-Za-z0-9_-]{16,64}$/.test(st) ? await env.CONFIG.get('gweb:' + st, 'json') : null;
+  if (!rec) return { error: '時間が経ちすぎたか、この許可の続きは使えません。もう一度「Google で許可」を押してください' };
+  await env.CONFIG.delete('gweb:' + st);   // 一度だけ
+  if (url.searchParams.get('error')) return { error: `Google の許可が取りやめになりました（${esc(url.searchParams.get('error'))}）。もう一度押せばやり直せます` };
+  const c = await googleWebConf(env);
+  const r = await fetcher('https://oauth2.googleapis.com/token', { method: 'POST', body: new URLSearchParams({ code: url.searchParams.get('code') || '', client_id: c.id, client_secret: c.secret, redirect_uri: GOOGLE_WEB_REDIRECT, grant_type: 'authorization_code', code_verifier: rec.v }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.refresh_token) return { error: `Google から許可を受け取れませんでした（${esc(j.error || r.status)}）。もう一度押してください` };
+  const st0 = await state(env);
+  let sheet = st0.sheet;
+  if (!sheet) {   // はじめて Google をつなぐ会社：台帳もここで作る（デバイスコードの方式と同じ）
+    const head = ['種類', 'ID', '中身', '更新'].map(v => ({ userEnteredValue: { stringValue: v } }));
+    const sr = await fetcher('https://sheets.googleapis.com/v4/spreadsheets', { method: 'POST', headers: { authorization: `Bearer ${j.access_token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ properties: { title: 'Orbit Package の台帳', locale: 'ja_JP', timeZone: 'Asia/Tokyo' }, sheets: [{ properties: { title: '作業台DB' }, data: [{ startRow: 0, startColumn: 0, rowData: [{ values: head }] }] }] }) });
+    const sj = await sr.json().catch(() => ({}));
+    if (!sr.ok) return { error: `台帳を作れませんでした（${esc((sj.error && sj.error.status) || sr.status)}）` };
+    sheet = sj.spreadsheetId; await putSecret(gh, 'WORKBENCH_SHEET', sheet);
+  }
+  await putSecret(gh, 'GOOGLE_OAUTH_JSON', JSON.stringify({ client_id: c.id, client_secret: c.secret, refresh_token: j.refresh_token, token_uri: 'https://oauth2.googleapis.com/token' }));
+  await mark(env, { google: true, sheet, google_scopes: String(j.scope || ''), secrets: [...new Set([...(st0.secrets || []), 'GOOGLE_OAUTH_JSON', 'WORKBENCH_SHEET'])] });
+  return { ok: true, scope: String(j.scope || ''), p: rec.p };
 }
 async function googlePoll(env, gh) {
   const dev = await env.CONFIG.get('gdev');
@@ -674,6 +725,14 @@ async function routeInner(req, env) {
       await env.CONFIG.put('inst', inst); await env.CONFIG.delete('tok');
       msg = await afterInstall(env, origin, gh, url.searchParams.get('code'));
       if (!msg) await tell(env, 'github', { repo: await env.CONFIG.get('repo') });
+    }
+    if (path === '/setup/google/web') { const r = await googleWebStart(env, url); return r.to ? go(r.to) : view(await viewState(env), origin, '⚠ ' + r.error); }   // Web の方式の許可（カレンダーなど・10/22）
+    if (path === '/setup/google/web/back') {
+      const r = await googleWebBack(env, gh, url);
+      if (!r.ok) return view(await viewState(env), origin, '⚠ ' + r.error);
+      await tell(env, 'google', { scope: r.scope });
+      const cal = /calendar/.test(r.scope);
+      return page('Google で許可', `<h1>✅ Google で許可しました</h1><p>${cal ? 'Google カレンダーを読む許可も入りました。' : '台帳（スプレッドシート）を使う許可が入りました。'}仕事は次の回から、この許可で動きます。</p><p class="muted">許可は Google アカウントの「サードパーティ製のアプリとサービス」からいつでも取り消せます。</p><p class="row"><a class="btn" href="/app/open">ホームに戻る</a><a class="btn sub" href="/setup">設定のページへ</a></p>`);
     }
     if (path === '/setup/google/start' && req.method === 'POST') return Response.json(await googleStart(env));
     if (path === '/setup/google/poll' && req.method === 'POST') return Response.json(await googlePoll(env, gh));
