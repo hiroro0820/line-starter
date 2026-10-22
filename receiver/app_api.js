@@ -16,6 +16,7 @@
 import { allowedOrigins, deviceOf } from './device.js';
 import { shelfData, buildRoute, listBuilds } from './shelf.js';
 import { commitFiles } from './github_app.js';
+import { monthUsage } from './usage.js';
 import { addInstruction, decideApproval, setupFinished } from './setup.js';
 
 export const API_VERSION = 1;
@@ -112,6 +113,12 @@ export function needsOf(rec, company, parts) {   // そのレシピで足りな�
   for (const it of [...(b.in || []), ...(b.checks || []), ...(b.out || [])]) for (const [k, v] of Object.entries(it.settings || {})) walk(v, it.part, k);
   return out;
 }
+async function readTrials(gh) {   // 通しの試しの報告（trial.py が custom/trials/<id>.json に書く）。{レシピの id: 報告}
+  const ls = await gh('GET', '/contents/cloud/lines/custom/trials');
+  if (ls.status !== 200 || !Array.isArray(ls.json)) return {};
+  const rows = await Promise.all(ls.json.filter(f => /^[\w.-]+\.json$/.test(f.name)).slice(0, 60).map(async f => { try { const r = JSON.parse(await readFile(gh, f.path)); return [f.name.replace(/\.json$/, ''), { 日時: r['日時'], ok: !!r.ok, problems: (r.problems || []).slice(0, 40), steps: (r.steps || []).slice(0, 60), 仮の材料: r['仮の材料'] || [] }]; } catch { return null; } }));
+  return Object.fromEntries(rows.filter(Boolean));
+}
 async function readCompany(gh) { try { return JSON.parse((await readFile(gh, 'cloud/lines/company.json')) || '{}'); } catch { return {}; } }
 async function stoppedIssues(gh) {
   const r = await gh('GET', `/issues?state=open&labels=${encodeURIComponent('止まった')}&per_page=30`);
@@ -123,19 +130,20 @@ async function stoppedIssues(gh) {
 }
 
 const modeRank = m => ({ '本番': 0, '影': 1, '停止': 3 }[m] ?? 2);
-function jobOf(rec, runs, approvals, live, fix = { needs: [], stopped: [] }) {
+function jobOf(rec, runs, approvals, live, fix = { needs: [], stopped: [], trial: null }) {
   const mine = runs.filter(r => r.job === rec.id), last = mine[mine.length - 1] || null, l = live[rec.id] || null;
   const waiting = approvals.filter(a => a.job === rec.id).length;
-  const needs = fix.needs.length, stopped = fix.stopped.length, broken = rec.mode !== '停止' && (needs || stopped);
-  const status = waiting ? '承認待ち' : l && l.running ? '実行中' : broken ? (needs ? '設定が必要' : '止まっています') : rec.mode === '停止' ? '停止中' : rec.mode === '影' ? '試し（影）' : rec.mode === '本番' ? '稼働中' : rec.mode || '—';
-  return { id: rec.id, name: rec.name, purpose: rec.purpose, when: rec.when, mode: rec.mode, kind: rec.kind, approval: rec.approval, status, waiting, running: !!(l && l.running), last, runs: mine.length, needs, stopped,
+  const trialNg = fix.trial && !fix.trial.ok ? fix.trial.problems.length : 0;
+  const needs = fix.needs.length, stopped = fix.stopped.length, broken = rec.mode !== '停止' && (needs || stopped || trialNg);
+  const status = waiting ? '承認待ち' : l && l.running ? '実行中' : broken ? (needs ? '設定が必要' : trialNg ? '直すことあり' : '止まっています') : rec.mode === '停止' ? '停止中' : rec.mode === '影' ? '試し（影）' : rec.mode === '本番' ? '稼働中' : rec.mode || '—';
+  return { id: rec.id, name: rec.name, purpose: rec.purpose, when: rec.when, mode: rec.mode, kind: rec.kind, approval: rec.approval, status, waiting, running: !!(l && l.running), last, runs: mine.length, needs, stopped, trial: fix.trial ? { ok: fix.trial.ok, problems: trialNg, 日時: fix.trial['日時'] } : null,
     steps: { in: (rec.in || []).map(x => x.name || x.part), ai: rec.ai, checks: rec.checks || [], out: rec.out || [] } };
 }
 
 async function gather(env, gh, hub) {
-  const [shelf, runs, approvals, recent, company, stopped] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => []), readCompany(gh), stoppedIssues(gh).catch(() => [])]);
+  const [shelf, runs, approvals, recent, company, stopped, trials] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => []), readCompany(gh), stoppedIssues(gh).catch(() => []), readTrials(gh).catch(() => ({}))]);
   const live = liveState(recent);
-  const fixes = Object.fromEntries((shelf.recipes || []).map(r => [r.id, { needs: needsOf(r, company, shelf.parts), stopped: stopped.filter(i => i.name === r.name || i.name === r.id) }]));
+  const fixes = Object.fromEntries((shelf.recipes || []).map(r => [r.id, { needs: needsOf(r, company, shelf.parts), stopped: stopped.filter(i => i.name === r.name || i.name === r.id), trial: trials[r.id] || null }]));
   const jobs = (shelf.recipes || []).map(r => jobOf(r, runs, approvals, live, fixes[r.id])).sort((a, b) => modeRank(a.mode) - modeRank(b.mode) || (b.last ? 1 : 0) - (a.last ? 1 : 0) || a.name.localeCompare(b.name, 'ja'));
   const names = Object.fromEntries(jobs.map(j => [j.id, j.name]));
   return { shelf, runs, approvals: approvals.map(a => ({ ...a, name: names[a.job] || a.job })), recent, live, jobs, names, company, stopped, fixes };
@@ -143,10 +151,10 @@ async function gather(env, gh, hub) {
 
 async function summary(env, gh, hub) {
   const g = await gather(env, gh, hub);
-  const builds = await listBuilds(gh, 6).catch(() => []);
+  const [builds, usage] = await Promise.all([listBuilds(gh, 6).catch(() => []), monthUsage(env, gh).catch(() => null)]);
   return { api: API_VERSION, setup: { finished: await setupFinished(env), shelf: !g.shelf.error, note: g.shelf.error || '' },
-    counts: { jobs: g.jobs.filter(j => j.mode && j.mode !== '停止').length, running: g.jobs.filter(j => j.running).length, attention: g.approvals.length },
-    attention: g.approvals, fix: g.jobs.filter(j => j.mode !== '停止' && (j.needs || j.stopped)).map(j => ({ id: j.id, name: j.name, needs: j.needs, stopped: j.stopped })), jobs: g.jobs, recent: g.runs.slice(-10).reverse().map(r => ({ ...r, name: g.names[r.job] || r.job })), builds };
+    usage, counts: { jobs: g.jobs.filter(j => j.mode && j.mode !== '停止').length, running: g.jobs.filter(j => j.running).length, attention: g.approvals.length },
+    attention: g.approvals, fix: g.jobs.filter(j => j.mode !== '停止' && (j.needs || j.stopped || (j.trial && !j.trial.ok))).map(j => ({ id: j.id, name: j.name, needs: j.needs, stopped: j.stopped, problems: j.trial && !j.trial.ok ? j.trial.problems : 0 })), jobs: g.jobs, recent: g.runs.slice(-10).reverse().map(r => ({ ...r, name: g.names[r.job] || r.job })), builds };
 }
 
 async function jobDetail(env, gh, hub, id) {
@@ -154,7 +162,7 @@ async function jobDetail(env, gh, hub, id) {
   if (!job) return null;
   const rec = (g.shelf.recipes || []).find(r => r.id === id) || {};
   return { job: { ...job, stop_words: rec.stop_words || [], limit: rec.limit || {}, ai_instruction: rec.ai_instruction || '' },
-    runs: g.runs.filter(r => r.job === id).slice(-30).reverse(), approvals: g.approvals.filter(a => a.job === id), live: g.live[id] || null, fix: g.fixes[id] || { needs: [], stopped: [] },
+    runs: g.runs.filter(r => r.job === id).slice(-30).reverse(), approvals: g.approvals.filter(a => a.job === id), live: g.live[id] || null, fix: g.fixes[id] || { needs: [], stopped: [], trial: null },
     recent: (g.recent || []).filter(e => e.kind === 'run' && e.job_id === id).slice(-40) };
 }
 
@@ -193,12 +201,12 @@ async function markRead(env, gh, hub, fp, b) {
 }
 
 // ── 仕事の状態を変える：指示（Issue＋instruct.yml）にする。決まった形だけ動く・記録と #orbit への報告が残る
-const MODE_WORDS = { '本番': '本番にして', '影': '影にして', '停止': '止めて', '再開': '再開して', '今すぐ': '動かして' };
+const MODE_WORDS = { '本番': '本番にして', '影': '影にして', '停止': '止めて', '再開': '再開して', '今すぐ': '動かして', '試す': '試して' };   // 試す＝通しの試し（外に出さない・後ろの段まで）
 async function changeMode(gh, b, jobs) {
   const job = jobs.find(j => j.id === String(b.id || ''));
   if (!job) return [{ error: 'その仕事は見つかりません' }, 404];
   const w = MODE_WORDS[b.to];
-  if (!w) return [{ error: '変え方は 本番・影・停止・再開・今すぐ のどれかです' }, 400];
+  if (!w) return [{ error: '変え方は 本番・影・停止・再開・今すぐ・試す のどれかです' }, 400];
   const no = await addInstruction(gh, `「${job.id}」を${w}`, '画面');
   return no ? [{ ok: true, issue: no, msg: `受け付けました（指示 #${no}）。1〜2分で反映され、結果は知らせの先にも届きます` }, 200] : [{ error: '受け付けられませんでした。少しして、もう一度押してください' }, 502];
 }

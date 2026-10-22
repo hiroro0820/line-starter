@@ -2,6 +2,7 @@
 //   データの元：お客様のリポジトリの cloud/lines/shelf.json（pack の shelf.py が作る）と custom/recipes/*.json・custom/share.json。
 //   画面が書くのは custom/builds（頼みの記録）と custom/share.json だけ。レシピと部品を作るのは Actions（build.yml・build_request.py）で、触れるのは custom/ の中だけ・モードは必ず「影」・承認は「止める」で始まる。出荷時のレシピ・部品を消す・変える道はない（パックの決まりと同じ）。
 import { commitFiles } from './github_app.js';
+import { monthUsage, budgetGuard } from './usage.js';
 import { CSS, JS } from './shelf_ui.js';
 import { BUILD_HTML } from './shelf_build_page.js';   // 組む（4つの口）の画面。元は shelf_build.html（build_shelf_page.py で書き出す）
 
@@ -90,7 +91,7 @@ export function composeRecipe(shelf, b, now = Date.now()) {
 
 // ── つくる：言葉で頼む → 提案 → 承認 → 開発（10/20）。記録は custom/builds/<番号>.json（状態・頼み・提案・結果）。提案と開発は Actions（build.yml）が、お客様の Claude で行う
 const BUILD_ID = /^b[0-9a-z]{4,20}$/;
-const ACTIVE = ['提案中', '開発中'], STALE_MS = 45 * 60 * 1000, DAILY = 8;
+const ACTIVE = ['提案中', '開発中'], STALE_MS = 45 * 60 * 1000;   // 1日の回数の上限はやめた：今月の使った量（usage.js）で止める（10/22 オーナー）
 const buildPath = id => `cloud/lines/custom/builds/${id}.json`;
 const stale = r => ACTIVE.includes(r['状態']) && Date.now() - (r['更新'] || 0) > STALE_MS;
 const shown = (id, r) => ({ id, ...(stale(r) ? { ...r, 状態: '失敗', 理由: 'うまく進みませんでした。もう一度、頼んでみてください' } : r) });
@@ -110,15 +111,13 @@ async function startStep(gh, id, r, step, message) {
   await putBuild(gh, id, { ...r, 状態: '失敗', 理由: '作業を始められませんでした。少し待って、もう一度試してください' }, `つくる：起動できず ${id}`);
   return { error: `作業を始められませんでした（GitHub ${d.status}）。少し待って、もう一度試してください` };
 }
-// 頼み方の確かめ（暴走と費用の守り）：長さ・1日の回数・同時に1つだけ
-export function askGuard(rows, text, now = Date.now()) {
+// 頼み方の確かめ（暴走と費用の守り）：長さ・同時に1つだけ・今月の使った量（Actions の分・AI の費用）が上限に近くないか
+export function askGuard(rows, text, now = Date.now(), usage = null) {
   const t = String(text || '').trim();
   if (t.length < 5) return '作りたい仕事を、もう少し詳しく書いてください（例：問い合わせが来たら担当にすぐ知らせたい）';
   if (t.length > 1500) return '長すぎます。1500字までにしてください';
   if (rows.some(r => ACTIVE.includes(r['状態']) && !stale(r))) return 'いま、ほかの依頼を作業中です。終わってから頼んでください';
-  const today = new Date(now + 9 * 3600e3).toISOString().slice(0, 10);
-  if (rows.filter(r => new Date((r['日時'] || 0) + 9 * 3600e3).toISOString().slice(0, 10) === today).length >= DAILY) return `1日に頼める回数（${DAILY}回）に達しました。明日また頼んでください`;
-  return null;
+  return budgetGuard(usage);
 }
 const forgetTables = async env => { try { if (env && env.CONFIG) { await env.CONFIG.delete('schedule'); await env.CONFIG.delete('triggers'); } } catch (e) { /* 控えが消せなくても、1時間で入れ替わる */ } };
 export async function buildRoute(req, env, gh, url, path) {   // 大元の画面（app_api.js）からも呼ぶ（10/22）
@@ -132,7 +131,7 @@ export async function buildRoute(req, env, gh, url, path) {   // 大元の画面
   if (req.method !== 'POST') return null;
   const b = await req.json().catch(() => null); if (!b) return json({ error: '形が違います' }, 400);
   if (path === '/shelf/ask') {
-    const rows = await listBuilds(gh, 40), bad = askGuard(rows, b.text);
+    const rows = await listBuilds(gh, 40), bad = askGuard(rows, b.text, Date.now(), await monthUsage(env || {}, gh).catch(() => null));
     if (bad) return json({ error: bad }, 429);
     const id = 'b' + Date.now().toString(36), r = { 状態: '提案中', 頼み: String(b.text).trim(), もと: String(b.from || '').slice(0, 60), 日時: Date.now(), 更新: Date.now() };
     const out = await startStep(gh, id, r, 'propose', `つくる：頼み ${id}`);
