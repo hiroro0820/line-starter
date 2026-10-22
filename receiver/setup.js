@@ -5,7 +5,7 @@
 // 承認のページ /a/<Issue>?s=<署名>（Discord の知らせのリンクから）と、指示のページ /i も、ここで受ける。
 // 入口は合言葉（Deploy のときにお客様が決めた SETUP_PASSWORD）。鍵の値は画面にも記録にも二度と出さない。
 import { shelfRoute } from './shelf.js';
-import { appLink, revokeDevices } from './device.js';   // 大元の画面（orbit-package.com/app）へ入る端末の合言葉（10/22）
+import { appLink, revokeDevices, APP_ORIGIN } from './device.js';   // 大元の画面（orbit-package.com/app）へ入る端末の合言葉（10/22）
 import { repoApi, manifest, convert, putSecret, commitFiles, installationToken, call, userToken, ensureRepo } from './github_app.js';
 
 const enc = new TextEncoder();
@@ -285,15 +285,17 @@ async function googleWebConf(env) {
   await env.CONFIG.put('google_web', JSON.stringify(c));
   return c;
 }
-export async function googleWebStart(env, url) {
+export const GOOGLE_SCOPES_OK = ['drive.file', 'calendar.readonly', 'calendar.events', 'gmail.send'];   // 画面から求めてよい範囲（部品が宣言した物だけ・受付の api/google.js と同じ）
+export async function googleWebStart(env, url, opt = {}) {   // opt.scopes＝要る範囲（台帳の drive.file は必ず）・opt.ret＝済んだら戻る画面の道（画面から始めたとき・10/22）
   const code = await env.CONFIG.get('code');
   if (!code || !env.ONBOARD_API) return { error: '導入コードがまだありません。先に設定のページの手順を進めてください' };
   if (!(await googleWebConf(env))) return { error: 'Google の許可（Web の方式）はまだ準備中です。担当者にお知らせください' };
-  const p = ['base', 'calendar', 'calendar_write'].includes(url.searchParams.get('p')) ? url.searchParams.get('p') : 'calendar';
+  const p = opt.scopes ? [...new Set(['drive.file', ...opt.scopes])].filter(x => GOOGLE_SCOPES_OK.includes(x)).join(',')
+    : ['base', 'calendar', 'calendar_write'].includes(url.searchParams.get('p')) ? url.searchParams.get('p') : 'calendar';
   const st = random(18), verifier = random(48);
   const challenge = b64u(await crypto.subtle.digest('SHA-256', enc.encode(verifier)));
-  await env.CONFIG.put('gweb:' + st, JSON.stringify({ v: verifier, p }), { expirationTtl: 600 });
-  return { to: `${new URL(env.ONBOARD_API).origin}/api/google?t=${encodeURIComponent(code)}&s=${st}&c=${challenge}&p=${p}` };
+  await env.CONFIG.put('gweb:' + st, JSON.stringify({ v: verifier, p, ret: opt.ret || null }), { expirationTtl: 600 });
+  return { to: `${new URL(env.ONBOARD_API).origin}/api/google?t=${encodeURIComponent(code)}&s=${st}&c=${challenge}&p=${encodeURIComponent(p)}` };
 }
 export async function googleWebBack(env, gh, url, fetcher = fetch) {
   const st = url.searchParams.get('s') || '';
@@ -317,7 +319,7 @@ export async function googleWebBack(env, gh, url, fetcher = fetch) {
   }
   await putSecret(gh, 'GOOGLE_OAUTH_JSON', JSON.stringify({ client_id: c.id, client_secret: c.secret, refresh_token: j.refresh_token, token_uri: 'https://oauth2.googleapis.com/token' }));
   await mark(env, { google: true, sheet, google_scopes: String(j.scope || ''), secrets: [...new Set([...(st0.secrets || []), 'GOOGLE_OAUTH_JSON', 'WORKBENCH_SHEET'])] });
-  return { ok: true, scope: String(j.scope || ''), p: rec.p };
+  return { ok: true, scope: String(j.scope || ''), p: rec.p, ret: rec.ret || null };
 }
 async function googlePoll(env, gh) {
   const dev = await env.CONFIG.get('gdev');
@@ -703,6 +705,15 @@ async function routeInner(req, env) {
     const f = await form(req);
     if (!same(await hmac(env.SETUP_PASSWORD, f.password || ''), await hmac(env.SETUP_PASSWORD, env.SETUP_PASSWORD))) return login('合言葉が違います');
     return go('/setup', await loginCookie(env));
+  }
+  if (path === '/setup/google/web/back' && !(await loggedIn(env, req))) {   // 画面から始めた許可：一度きりの印（10分）で確かめ、ログインなしで画面へ戻す（10/22）
+    const st = url.searchParams.get('s') || '';
+    const rec = /^[A-Za-z0-9_-]{16,64}$/.test(st) ? await env.CONFIG.get('gweb:' + st, 'json') : null;
+    if (rec && rec.ret) {
+      const r = await googleWebBack(env, gh, url);
+      if (r.ok) { await tell(env, 'google', { scope: r.scope }); return go(`${APP_ORIGIN}/app/#/${rec.ret.job ? 'job/' + encodeURIComponent(rec.ret.job) : ''}`); }
+      return page('Google で許可', `<h1>Google の許可が済みませんでした</h1><p>${r.error}</p><p><a class="btn" href="${APP_ORIGIN}/app/">画面に戻る</a></p>`);
+    }
   }
   // GitHub から戻る道（ログインのクッキーは SameSite=Lax で付いてくる）
   if (!(await loggedIn(env, req))) return login();

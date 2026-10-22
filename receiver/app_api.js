@@ -11,14 +11,16 @@
 //   GET  /app/api/builds・/app/api/build?id=・POST /app/api/ask・/app/api/build/(approve|answer|cancel)
 //                                    … 言葉で頼む（提案 → 承認 → 開発）。中身は棚の画面と同じ（shelf.js の buildRoute）
 //   POST /app/api/settings           … { path, value } 会社の設定を保存（画面の「直すこと」から・鍵は断る）
+//   POST /app/api/secret             … { name, value } 鍵をこの場で入れる（暗号化して御社の GitHub の秘密の設定へ。どれかの仕事が要る鍵だけ・10/22）
+//   POST /app/api/google             … { job } Google で許可：全部の仕事が要る範囲だけをまとめて求める（最小）。済んだら画面のその仕事へ戻る
 //   POST /app/api/share              … { kind: part|recipe, name, on } 大元へ戻す印（custom/share.json）を付ける・外す。御社だけの部品・仕事だけ（夜の share.yml が確かめて申し出る）
 //   POST /app/api/live-ticket        … ライブ表示（WebSocket）の切符（60秒・1回だけ）。/live?ticket=<切符> でつなぐ
 //   POST /run/event                  … Actions の仕事から段ごとの動き（live.py・承認の鍵で確かめる）→ 常駐の担当が画面へ配る
 import { allowedOrigins, deviceOf } from './device.js';
 import { shelfData, buildRoute, listBuilds, toggleShare } from './shelf.js';
-import { commitFiles } from './github_app.js';
+import { commitFiles, putSecret } from './github_app.js';
 import { monthUsage } from './usage.js';
-import { addInstruction, decideApproval, setupFinished } from './setup.js';
+import { addInstruction, decideApproval, setupFinished, googleWebStart, GOOGLE_SCOPES_OK } from './setup.js';
 
 export const API_VERSION = 1;
 const TYPES = ['run.queued', 'run.started', 'step.started', 'step.progress', 'step.completed', 'step.failed', 'approval.required', 'approval.granted', 'run.failed', 'run.completed'];
@@ -114,6 +116,53 @@ export function needsOf(rec, company, parts) {   // そのレシピで足りな�
   for (const it of [...(b.in || []), ...(b.checks || []), ...(b.out || [])]) for (const [k, v] of Object.entries(it.settings || {})) walk(v, it.part, k);
   return out;
 }
+// ── 準備：仕事が動くのに要る鍵と Google の範囲を、部品の宣言（shelf.json の needs）から全部割り出す（10/22 オーナー：あとから出さない・一度で・最小）
+export const SCOPE_WORDS = { 'drive.file': '台帳とファイル', 'calendar.readonly': 'カレンダーを読む', 'calendar.events': 'カレンダーに予定を入れる', 'gmail.send': 'メールを送る' };
+const COVERS = { 'calendar.readonly': ['calendar.readonly', 'calendar.events', 'calendar'], 'calendar.events': ['calendar.events', 'calendar'], 'drive.file': ['drive.file', 'drive', 'spreadsheets'], 'gmail.send': ['gmail.send', 'gmail.compose', 'gmail.modify'] };
+const shortScope = x => String(x).split('/auth/').pop();
+export const covered = (sc, have) => (have || []).some(h => (COVERS[sc] || [sc]).includes(shortScope(h)));
+const KEY_NAME = /^[A-Z][A-Z0-9_]{2,60}$/;
+const CORE_SECRETS = new Set(['APPROVE_KEY', 'RECEIVER_URL', 'GOOGLE_OAUTH_JSON', 'WORKBENCH_SHEET', 'ONBOARD_CODE', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID', 'DISCORD_WEBHOOK_URL', 'SLACK_WEBHOOK_URL', 'GITHUB_TOKEN']);   // 導入で入る鍵（この画面からは入れ替えさせない）
+async function haveOf(env, gh) {   // いま御社にある鍵の名前（GitHub の秘密の設定）と、Google の許可の範囲（許可したときの記録）
+  const done = (env.CONFIG && await env.CONFIG.get('done', 'json')) || {};
+  const r = await gh('GET', '/actions/secrets?per_page=100').catch(() => null);
+  const names = r && r.status === 200 && Array.isArray(r.json.secrets) ? r.json.secrets.map(x => x.name) : (done.secrets || []);
+  const scopes = String(done.google_scopes || '').split(/\s+/).filter(Boolean);
+  return { secrets: new Set(names), scopes: scopes.length ? scopes : done.google ? ['drive.file'] : [] };
+}
+export function prepOf(rec, parts, have, trial) {
+  const byName = Object.fromEntries((parts || []).map(p => [p.name, p])), b = rec.blocks || {}, keys = new Map(), google = new Map();
+  const ok = (conf, pairs) => pairs.every(([k, d]) => have.secrets.has(conf[k] || d));
+  for (const it of [...(b.in || []), ...(b.checks || []), ...(b.out || [])]) {
+    const n = (byName[it.part] || {}).needs || {}, conf = it.settings || {};
+    for (const [k, d] of n.keys || []) { const name = conf[k] || d; if (!have.secrets.has(name)) keys.set(name, it.part); }
+    if (!(n.google || []).length || ((n.or_keys || []).length && ok(conf, n.or_keys))) continue;
+    for (const sc of n.google) if (!covered(sc, have.scopes)) google.set(sc, it.part);
+  }
+  for (const p of (trial && trial.problems) || []) {   // 宣言のない部品（御社だけの部品など）で、試しが見つけた鍵
+    const m = p.種類 === '鍵' && /鍵 ([A-Z][A-Z0-9_]+) がありません/.exec(p.理由 || '');
+    if (m && !have.secrets.has(m[1]) && !keys.has(m[1])) keys.set(m[1], p.部品 || '');
+  }
+  return { keys: [...keys].map(([name, part]) => ({ name, part })), google: [...google].map(([scope, part]) => ({ scope, part, words: SCOPE_WORDS[scope] || scope })) };
+}
+// 求める範囲：動いている全部の仕事が要る物＋もう持っている物（include_granted_scopes で前の許可も残る）。書き込みがあれば読むだけの範囲は求めない
+export function scopesToAsk(g) {
+  const want = new Set((g.have.scopes || []).map(shortScope).filter(x => GOOGLE_SCOPES_OK.includes(x)));
+  for (const r of g.shelf.recipes || []) if (r.mode !== '停止') for (const x of (g.fixes[r.id] || {}).prep?.google || []) want.add(x.scope);
+  if (want.has('calendar.events')) want.delete('calendar.readonly');
+  return [...want].filter(x => GOOGLE_SCOPES_OK.includes(x));
+}
+async function saveSecret(env, gh, g, b) {
+  const name = String(b.name || ''), value = typeof b.value === 'string' ? b.value.trim() : '';
+  const wanted = new Set(); for (const f of Object.values(g.fixes)) for (const k of (f.prep || {}).keys || []) wanted.add(k.name);
+  if (!KEY_NAME.test(name) || CORE_SECRETS.has(name) || !wanted.has(name)) return [{ error: 'その鍵は、どの仕事も待っていません' }, 400];
+  if (!value || value.length > 4000) return [{ error: '鍵を入れてください（4000字まで）' }, 400];
+  await putSecret(gh, name, value);
+  const done = (await env.CONFIG.get('done', 'json')) || {};
+  await env.CONFIG.put('done', JSON.stringify({ ...done, secrets: [...new Set([...(done.secrets || []), name])] }));
+  return [{ ok: true, msg: `鍵 ${name} を入れました（暗号化して御社の GitHub に入れました。この画面にも大元にも残りません）` }, 200];
+}
+
 async function readTrials(gh) {   // 通しの試しの報告（trial.py が custom/trials/<id>.json に書く）。{レシピの id: 報告}
   const ls = await gh('GET', '/contents/cloud/lines/custom/trials');
   if (ls.status !== 200 || !Array.isArray(ls.json)) return {};
@@ -131,23 +180,25 @@ async function stoppedIssues(gh) {
 }
 
 const modeRank = m => ({ '本番': 0, '影': 1, '停止': 3 }[m] ?? 2);
+const PREP_KINDS = ['設定', '鍵', '権限'];
 function jobOf(rec, runs, approvals, live, fix = { needs: [], stopped: [], trial: null }) {
   const mine = runs.filter(r => r.job === rec.id), last = mine[mine.length - 1] || null, l = live[rec.id] || null;
   const waiting = approvals.filter(a => a.job === rec.id).length;
-  const trialNg = fix.trial && !fix.trial.ok ? fix.trial.problems.length : 0;
-  const needs = fix.needs.length, stopped = fix.stopped.length, broken = rec.mode !== '停止' && (needs || stopped || trialNg);
-  const status = waiting ? '承認待ち' : l && l.running ? '実行中' : broken ? (needs ? '設定が必要' : trialNg ? '直すことあり' : '止まっています') : rec.mode === '停止' ? '停止中' : rec.mode === '影' ? '試し（影）' : rec.mode === '本番' ? '稼働中' : rec.mode || '—';
-  return { id: rec.id, name: rec.name, purpose: rec.purpose, when: rec.when, mode: rec.mode, kind: rec.kind, approval: rec.approval, status, waiting, running: !!(l && l.running), last, runs: mine.length, needs, stopped, trial: fix.trial ? { ok: fix.trial.ok, problems: trialNg, 日時: fix.trial['日時'] } : null,
+  const trialNg = fix.trial && !fix.trial.ok ? fix.trial.problems.filter(p => !PREP_KINDS.includes(p.種類)).length : 0;   // 設定・鍵・権限は準備（今の状態から数え直す）
+  const prep = fix.prep ? fix.prep.keys.length + fix.prep.google.length : 0;
+  const needs = fix.needs.length, stopped = fix.stopped.length, broken = rec.mode !== '停止' && (needs || prep || stopped || trialNg);
+  const status = waiting ? '承認待ち' : l && l.running ? '実行中' : broken ? (needs ? '設定が必要' : prep ? '準備が必要' : trialNg ? '直すことあり' : '止まっています') : rec.mode === '停止' ? '停止中' : rec.mode === '影' ? '試し（影）' : rec.mode === '本番' ? '稼働中' : rec.mode || '—';
+  return { id: rec.id, name: rec.name, purpose: rec.purpose, when: rec.when, mode: rec.mode, kind: rec.kind, approval: rec.approval, status, waiting, running: !!(l && l.running), last, runs: mine.length, needs, prep, stopped, trial: fix.trial ? { ok: fix.trial.ok, problems: trialNg, 日時: fix.trial['日時'] } : null,
     steps: { in: (rec.in || []).map(x => x.name || x.part), ai: rec.ai, checks: rec.checks || [], out: rec.out || [] } };
 }
 
 async function gather(env, gh, hub) {
-  const [shelf, runs, approvals, recent, company, stopped, trials] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => []), readCompany(gh), stoppedIssues(gh).catch(() => []), readTrials(gh).catch(() => ({}))]);
+  const [shelf, runs, approvals, recent, company, stopped, trials, have] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => []), readCompany(gh), stoppedIssues(gh).catch(() => []), readTrials(gh).catch(() => ({})), haveOf(env, gh).catch(() => ({ secrets: new Set(), scopes: [] }))]);
   const live = liveState(recent);
-  const fixes = Object.fromEntries((shelf.recipes || []).map(r => [r.id, { needs: needsOf(r, company, shelf.parts), stopped: stopped.filter(i => i.name === r.name || i.name === r.id), trial: trials[r.id] || null }]));
+  const fixes = Object.fromEntries((shelf.recipes || []).map(r => [r.id, { needs: needsOf(r, company, shelf.parts), prep: prepOf(r, shelf.parts, have, trials[r.id]), stopped: stopped.filter(i => i.name === r.name || i.name === r.id), trial: trials[r.id] || null }]));
   const jobs = (shelf.recipes || []).map(r => jobOf(r, runs, approvals, live, fixes[r.id])).sort((a, b) => modeRank(a.mode) - modeRank(b.mode) || (b.last ? 1 : 0) - (a.last ? 1 : 0) || a.name.localeCompare(b.name, 'ja'));
   const names = Object.fromEntries(jobs.map(j => [j.id, j.name]));
-  return { shelf, runs, approvals: approvals.map(a => ({ ...a, name: names[a.job] || a.job })), recent, live, jobs, names, company, stopped, fixes };
+  return { shelf, runs, approvals: approvals.map(a => ({ ...a, name: names[a.job] || a.job })), recent, live, jobs, names, company, stopped, fixes, have, trials };
 }
 
 async function summary(env, gh, hub) {
@@ -155,7 +206,7 @@ async function summary(env, gh, hub) {
   const [builds, usage] = await Promise.all([listBuilds(gh, 6).catch(() => []), monthUsage(env, gh).catch(() => null)]);
   return { api: API_VERSION, setup: { finished: await setupFinished(env), shelf: !g.shelf.error, note: g.shelf.error || '' },
     usage, counts: { jobs: g.jobs.filter(j => j.mode && j.mode !== '停止').length, running: g.jobs.filter(j => j.running).length, attention: g.approvals.length },
-    attention: g.approvals, fix: g.jobs.filter(j => j.mode !== '停止' && (j.needs || j.stopped || (j.trial && !j.trial.ok))).map(j => ({ id: j.id, name: j.name, needs: j.needs, stopped: j.stopped, problems: j.trial && !j.trial.ok ? j.trial.problems : 0 })), jobs: g.jobs, recent: g.runs.slice(-10).reverse().map(r => ({ ...r, name: g.names[r.job] || r.job })), builds };
+    attention: g.approvals, fix: g.jobs.filter(j => j.mode !== '停止' && (j.needs || j.stopped || j.prep || (j.trial && !j.trial.ok))).map(j => ({ id: j.id, name: j.name, needs: j.needs, stopped: j.stopped, prep: j.prep || 0, problems: j.trial && !j.trial.ok ? j.trial.problems : 0 })), jobs: g.jobs, recent: g.runs.slice(-10).reverse().map(r => ({ ...r, name: g.names[r.job] || r.job })), builds };
 }
 
 async function jobDetail(env, gh, hub, id) {
@@ -309,6 +360,13 @@ export async function appRoute(req, env, { gh, hub } = {}) {
     if (!b || typeof b !== 'object') return send(req, env, { error: '形が違います' }, 400);
     if (path === '/app/api/notices/read') return send(req, env, await markRead(env, gh, hub, fp, b));
     if (path === '/app/api/settings') { const [o, st] = await saveSetting(env, gh, hub, b); return send(req, env, o, st); }
+    if (path === '/app/api/secret') { const [o, st] = await saveSecret(env, gh, await gather(env, gh, hub), b); return send(req, env, o, st); }
+    if (path === '/app/api/google') {
+      const g = await gather(env, gh, hub), scopes = scopesToAsk(g);
+      const job = g.jobs.some(j => j.id === String(b.job || '')) ? String(b.job) : '';
+      const r = await googleWebStart(env, url, { scopes, ret: { job } });
+      return r.to ? send(req, env, { to: r.to, scopes }) : send(req, env, { error: r.error }, 409);
+    }
     if (path === '/app/api/share') { const [o, st] = await saveShare(gh, b); return send(req, env, o, st); }
     if (path === '/app/api/job/mode') { const g = await gather(env, gh, hub); const [o, st] = await changeMode(gh, b, g.jobs); return send(req, env, o, st); }
     if (path === '/app/api/approval') {
