@@ -706,7 +706,7 @@ async function routeInner(req, env) {
     if (!same(await hmac(env.SETUP_PASSWORD, f.password || ''), await hmac(env.SETUP_PASSWORD, env.SETUP_PASSWORD))) return login('合言葉が違います');
     return go('/setup', await loginCookie(env));
   }
-  if (path === '/setup/google/web/back' && !(await loggedIn(env, req))) {   // 画面から始めた許可：一度きりの印（10分）で確かめ、ログインなしで画面へ戻す（10/22）
+  if (path === '/setup/google/web/back') {   // 画面から始めた許可（印に ret がある）：一度きりの印（10分）で確かめ、ログインの有無にかかわらず画面の仕事へ戻す（10/22 t4：設定のページのログインが残ると完了画面に出ていた）
     const st = url.searchParams.get('s') || '';
     const rec = /^[A-Za-z0-9_-]{16,64}$/.test(st) ? await env.CONFIG.get('gweb:' + st, 'json') : null;
     if (rec && rec.ret) {

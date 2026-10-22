@@ -99,7 +99,7 @@ export function shapeOf(part, key) {   // 部品の説明（例「calendars＝{�
   if (def && def.default && typeof def.default === 'object') return Array.isArray(def.default) ? { shape: 'list' } : { shape: 'map', name: '名前', value: '値' };
   return { shape: 'text' };
 }
-export function needsOf(rec, company, parts) {   // そのレシピで足りない会社の設定の並び
+export function needsOf(rec, company, parts) {   // そのレシピで足りない会社の設定の並び（埋め方のある設定は除く。残った物は選べる値 choices つき）
   const out = [], seen = new Set(), byName = Object.fromEntries((parts || []).map(p => [p.name, p]));
   const walk = (v, part, key) => {
     if (v && typeof v === 'object') { for (const x of Object.values(v)) walk(x, part, key); return; }
@@ -108,12 +108,15 @@ export function needsOf(rec, company, parts) {   // そのレシピで足りな�
       const path = m[1];
       if (seen.has(path) || !empty(getPath(company, path))) continue;
       seen.add(path);
-      const p = byName[part], s = ((p && p.settings) || []).find(x => x.key === key);
-      out.push({ path, part, key, required: !!(s && s.required), secret: SECRETISH.test(path), ...shapeOf(p, key) });
+      const p = byName[part], s = ((p && p.settings) || []).find(x => x.key === key), choices = ((p && p.choices) || {})[key];
+      out.push({ path, part, key, required: !!(s && s.required), secret: SECRETISH.test(path), ...shapeOf(p, key), ...(Array.isArray(choices) && choices.length ? { choices: choices.map(String) } : {}) });
     }
   };
   const b = rec.blocks || {};
-  for (const it of [...(b.in || []), ...(b.checks || []), ...(b.out || [])]) for (const [k, v] of Object.entries(it.settings || {})) walk(v, it.part, k);
+  for (const it of [...(b.in || []), ...(b.checks || []), ...(b.out || [])]) {
+    const auto = ((byName[it.part] || {}).auto) || {};   // 埋め方のある設定は、空なら実行のときに部品が埋める（準備に出さない・10/22 オーナー：お客様に手入力を求めない）
+    for (const [k, v] of Object.entries(it.settings || {})) if (!(k in auto)) walk(v, it.part, k);
+  }
   return out;
 }
 // ── 準備：仕事が動くのに要る鍵と Google の範囲を、部品の宣言（shelf.json の needs）から全部割り出す（10/22 オーナー：あとから出さない・一度で・最小）
@@ -196,7 +199,11 @@ function jobOf(rec, runs, approvals, live, fix = { needs: [], stopped: [], trial
 async function gather(env, gh, hub) {
   const [shelf, runs, approvals, recent, company, stopped, trials, have] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => []), readCompany(gh), stoppedIssues(gh).catch(() => []), readTrials(gh).catch(() => ({})), haveOf(env, gh).catch(() => ({ secrets: new Set(), scopes: [] }))]);
   const live = liveState(recent);
-  const fixes = Object.fromEntries((shelf.recipes || []).map(r => [r.id, { needs: needsOf(r, company, shelf.parts), prep: prepOf(r, shelf.parts, have, trials[r.id]), stopped: stopped.filter(i => i.name === r.name || i.name === r.id), trial: trials[r.id] || null }]));
+  const fixes = Object.fromEntries((shelf.recipes || []).map(r => {
+    const needs = needsOf(r, company, shelf.parts), left = new Set(needs.map(n => n.path));
+    const mine = stopped.filter(i => (i.name === r.name || i.name === r.id) && !(i.needs.length && i.needs.every(x => !left.has(x))));   // 設定が足りなくて止まった知らせは、その設定がもう要らない（入った・部品が埋める）なら出さない
+    return [r.id, { needs, prep: prepOf(r, shelf.parts, have, trials[r.id]), stopped: mine, trial: trials[r.id] || null }];
+  }));
   const jobs = (shelf.recipes || []).map(r => jobOf(r, runs, approvals, live, fixes[r.id])).sort((a, b) => modeRank(a.mode) - modeRank(b.mode) || (b.last ? 1 : 0) - (a.last ? 1 : 0) || a.name.localeCompare(b.name, 'ja'));
   const names = Object.fromEntries(jobs.map(j => [j.id, j.name]));
   return { shelf, runs, approvals: approvals.map(a => ({ ...a, name: names[a.job] || a.job })), recent, live, jobs, names, company, stopped, fixes, have, trials };
@@ -306,11 +313,15 @@ async function saveSetting(env, gh, hub, b) {
   const used = new Set(); for (const r of g.shelf.recipes || []) for (const it of [...((r.blocks || {}).in || []), ...((r.blocks || {}).checks || []), ...((r.blocks || {}).out || [])]) for (const v of Object.values(it.settings || {})) for (const m of JSON.stringify(v).matchAll(REF)) used.add(m[1]);
   if (!used.has(path)) return [{ error: 'その設定は、どの仕事も使っていません' }, 400];
   const value = cleanValue(b.value);
-  if (value === null) return [{ error: '値を入れてください（1つの値は500字まで・表は50行まで）' }, 400];
+  if (value === null) return [{ error: '値を選んでください' }, 400];
+  const need = Object.values(g.fixes).flatMap(f => f.needs || []).find(n => n.path === path);   // 入れてよいのは選べる値だけ（10/22 オーナー：お客様に手入力を求めない）
+  const picked = typeof value === 'string' ? [value] : Array.isArray(value) ? value : Object.values(value);
+  if (!need || !need.choices || !picked.every(x => need.choices.includes(x))) return [{ error: 'この設定は選ぶだけです。選べる値が無いときは「AIに直してもらう」で、自動で埋まる作りに直します', code: 'choose' }, 400];
   const company = setPath(JSON.parse(JSON.stringify(g.company || {})), path, value);
   await commitFiles(gh, { 'cloud/lines/company.json': { mode: '100644', content: JSON.stringify(company, null, 2) + '\n' } }, `画面：会社の設定 ${path} を入れた`);
   let closed = 0;   // 足りない設定が原因で止まっていた知らせは、全部そろったら閉じる
-  for (const i of g.stopped) if (i.needs.length && i.needs.every(p => p === path || !empty(getPath(company, p)))) {
+  const left = new Set(Object.values(g.fixes).flatMap(f => (f.needs || []).map(n => n.path)));
+  for (const i of g.stopped) if (i.needs.length && i.needs.every(p => p === path || !empty(getPath(company, p)) || !left.has(p))) {
     await gh('POST', `/issues/${i.n}/comments`, { body: '画面から会社の設定を入れました。次の回から動きます' }); await gh('PATCH', `/issues/${i.n}`, { state: 'closed' }); closed++;
   }
   return [{ ok: true, msg: `保存しました（${path}）${closed ? '。止まっていた知らせを閉じました' : ''}`, closed }, 200];
