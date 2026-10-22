@@ -139,9 +139,10 @@ export function prepOf(rec, parts, have, trial) {
     if (!(n.google || []).length || ((n.or_keys || []).length && ok(conf, n.or_keys))) continue;
     for (const sc of n.google) if (!covered(sc, have.scopes)) google.set(sc, it.part);
   }
-  for (const p of (trial && trial.problems) || []) {   // 宣言のない部品（御社だけの部品など）で、試しが見つけた鍵
+  const alt = new Set((parts || []).flatMap(p => ((p.needs || {}).or_keys || []).map(([, d]) => d)));   // 代わりの道（Google の許可）がある鍵（メールのアプリパスワードなど）
+  for (const p of (trial && trial.problems) || []) {   // 宣言のない部品（御社だけの部品など）で、試しが見つけた鍵。代わりの道がある鍵は出さない（10/22 t4：古い試しの MAIL_* が残った）
     const m = p.種類 === '鍵' && /鍵 ([A-Z][A-Z0-9_]+) がありません/.exec(p.理由 || '');
-    if (m && !have.secrets.has(m[1]) && !keys.has(m[1])) keys.set(m[1], p.部品 || '');
+    if (m && !have.secrets.has(m[1]) && !keys.has(m[1]) && !alt.has(m[1])) keys.set(m[1], p.部品 || '');
   }
   return { keys: [...keys].map(([name, part]) => ({ name, part })), google: [...google].map(([scope, part]) => ({ scope, part, words: SCOPE_WORDS[scope] || scope })) };
 }
