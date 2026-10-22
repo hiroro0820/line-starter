@@ -140,8 +140,9 @@ export async function buildRoute(req, env, gh, url, path) {   // 大元の画面
   }
   const id = String(b.id || ''), r = BUILD_ID.test(id) ? await readBuild(gh, id) : null;
   if (!r) return json({ error: '見つかりません' }, 404);
-  if (path === '/shelf/build/approve') {
-    if (r['状態'] !== '提案できた') return json({ error: '承認できるのは、提案ができた依頼だけです' }, 409);
+  if (path === '/shelf/build/approve') {   // 作る段で落ちた依頼（承認済み・提案あり）は、提案をやり直さずに同じ提案で作り直せる（10/22）
+    const retry = r['状態'] === '失敗' && r['承認'] && r['提案'];
+    if (r['状態'] !== '提案できた' && !retry) return json({ error: '承認できるのは、提案ができた依頼だけです' }, 409);
     const out = await startStep(gh, id, { ...r, 状態: '開発中', 承認: Date.now(), 更新: Date.now() }, 'make', `つくる：承認 ${id}`);
     return json(out, out.error ? 502 : 200);
   }

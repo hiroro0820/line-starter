@@ -10,10 +10,12 @@
 //   GET  /app/api/approval?n=        … 承認待ちの中身／POST { n, ok, note } で決める（リンクのページと同じ道）
 //   GET  /app/api/builds・/app/api/build?id=・POST /app/api/ask・/app/api/build/(approve|answer|cancel)
 //                                    … 言葉で頼む（提案 → 承認 → 開発）。中身は棚の画面と同じ（shelf.js の buildRoute）
+//   POST /app/api/settings           … { path, value } 会社の設定を保存（画面の「直すこと」から・鍵は断る）
 //   POST /app/api/live-ticket        … ライブ表示（WebSocket）の切符（60秒・1回だけ）。/live?ticket=<切符> でつなぐ
 //   POST /run/event                  … Actions の仕事から段ごとの動き（live.py・承認の鍵で確かめる）→ 常駐の担当が画面へ配る
 import { allowedOrigins, deviceOf } from './device.js';
 import { shelfData, buildRoute, listBuilds } from './shelf.js';
+import { commitFiles } from './github_app.js';
 import { addInstruction, decideApproval, setupFinished } from './setup.js';
 
 export const API_VERSION = 1;
@@ -78,21 +80,65 @@ export function liveState(recent, now = Date.now()) {
   return out;
 }
 
+// ── 直すこと（10/22 オーナー：エラーが出たら orbit の画面から直せるように）
+// ①足りない会社の設定：レシピの設定にある {会社:a.b} が、お客様の会社の設定（cloud/lines/company.json）に無い物。画面で値を入れて保存できる
+// ②止まった知らせ：recipe.py の warn が作る Issue（ラベル「止まった」・見出し「⚠️ 止まっているレシピ：<名前>」）。理由を見せ、AI に相談して直す道へ
+const REF = /\{会社:([\w.]+)\}/g;
+const SECRETISH = /(key|token|secret|password|passwd|鍵|合言葉|パスワード)/i;
+export const getPath = (o, path) => path.split('.').reduce((v, k) => (v && typeof v === 'object' && k in v ? v[k] : undefined), o);
+const empty = v => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+export function shapeOf(part, key) {   // 部品の説明（例「calendars＝{人: カレンダーID}」）から、入れ方（1つの値・名前と値の表・並び）を決める
+  const d = String((part && part.desc) || ''), m = new RegExp(`${key}＝\\{([^:：}]+)[:：]\\s*([^}]+)\\}`).exec(d);
+  if (m) return { shape: 'map', name: m[1].trim(), value: m[2].trim() };
+  if (new RegExp(`${key}＝\\[`).test(d)) return { shape: 'list' };
+  const def = ((part && part.settings) || []).find(x => x.key === key);
+  if (def && def.default && typeof def.default === 'object') return Array.isArray(def.default) ? { shape: 'list' } : { shape: 'map', name: '名前', value: '値' };
+  return { shape: 'text' };
+}
+export function needsOf(rec, company, parts) {   // そのレシピで足りない会社の設定の並び
+  const out = [], seen = new Set(), byName = Object.fromEntries((parts || []).map(p => [p.name, p]));
+  const walk = (v, part, key) => {
+    if (v && typeof v === 'object') { for (const x of Object.values(v)) walk(x, part, key); return; }
+    if (typeof v !== 'string') return;
+    for (const m of v.matchAll(REF)) {
+      const path = m[1];
+      if (seen.has(path) || !empty(getPath(company, path))) continue;
+      seen.add(path);
+      const p = byName[part], s = ((p && p.settings) || []).find(x => x.key === key);
+      out.push({ path, part, key, required: !!(s && s.required), secret: SECRETISH.test(path), ...shapeOf(p, key) });
+    }
+  };
+  const b = rec.blocks || {};
+  for (const it of [...(b.in || []), ...(b.checks || []), ...(b.out || [])]) for (const [k, v] of Object.entries(it.settings || {})) walk(v, it.part, k);
+  return out;
+}
+async function readCompany(gh) { try { return JSON.parse((await readFile(gh, 'cloud/lines/company.json')) || '{}'); } catch { return {}; } }
+async function stoppedIssues(gh) {
+  const r = await gh('GET', `/issues?state=open&labels=${encodeURIComponent('止まった')}&per_page=30`);
+  if (r.status !== 200 || !Array.isArray(r.json)) return [];
+  return r.json.filter(i => !i.pull_request).map(i => {
+    const body = String(i.body || ''), nd = /<!--\s*needs:\s*([^>]*?)\s*-->/.exec(body);
+    return { n: i.number, name: String(i.title || '').replace(/^⚠️\s*止まっているレシピ：/, '').trim(), why: body.split('\n\n直したら')[0].replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 1500), needs: nd ? nd[1].split(',').map(x => x.trim()).filter(Boolean) : [], at: i.created_at };
+  });
+}
+
 const modeRank = m => ({ '本番': 0, '影': 1, '停止': 3 }[m] ?? 2);
-function jobOf(rec, runs, approvals, live) {
+function jobOf(rec, runs, approvals, live, fix = { needs: [], stopped: [] }) {
   const mine = runs.filter(r => r.job === rec.id), last = mine[mine.length - 1] || null, l = live[rec.id] || null;
   const waiting = approvals.filter(a => a.job === rec.id).length;
-  const status = waiting ? '承認待ち' : l && l.running ? '実行中' : rec.mode === '停止' ? '停止中' : rec.mode === '影' ? '試し（影）' : rec.mode === '本番' ? '稼働中' : rec.mode || '—';
-  return { id: rec.id, name: rec.name, purpose: rec.purpose, when: rec.when, mode: rec.mode, kind: rec.kind, approval: rec.approval, status, waiting, running: !!(l && l.running), last, runs: mine.length,
+  const needs = fix.needs.length, stopped = fix.stopped.length, broken = rec.mode !== '停止' && (needs || stopped);
+  const status = waiting ? '承認待ち' : l && l.running ? '実行中' : broken ? (needs ? '設定が必要' : '止まっています') : rec.mode === '停止' ? '停止中' : rec.mode === '影' ? '試し（影）' : rec.mode === '本番' ? '稼働中' : rec.mode || '—';
+  return { id: rec.id, name: rec.name, purpose: rec.purpose, when: rec.when, mode: rec.mode, kind: rec.kind, approval: rec.approval, status, waiting, running: !!(l && l.running), last, runs: mine.length, needs, stopped,
     steps: { in: (rec.in || []).map(x => x.name || x.part), ai: rec.ai, checks: rec.checks || [], out: rec.out || [] } };
 }
 
 async function gather(env, gh, hub) {
-  const [shelf, runs, approvals, recent] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => [])]);
+  const [shelf, runs, approvals, recent, company, stopped] = await Promise.all([shelfData(gh).catch(e => ({ error: String(e.message || e) })), readRuns(gh).catch(() => []), openApprovals(gh).catch(() => []), (hub ? hub.recent() : Promise.resolve([])).catch(() => []), readCompany(gh), stoppedIssues(gh).catch(() => [])]);
   const live = liveState(recent);
-  const jobs = (shelf.recipes || []).map(r => jobOf(r, runs, approvals, live)).sort((a, b) => modeRank(a.mode) - modeRank(b.mode) || (b.last ? 1 : 0) - (a.last ? 1 : 0) || a.name.localeCompare(b.name, 'ja'));
+  const fixes = Object.fromEntries((shelf.recipes || []).map(r => [r.id, { needs: needsOf(r, company, shelf.parts), stopped: stopped.filter(i => i.name === r.name || i.name === r.id) }]));
+  const jobs = (shelf.recipes || []).map(r => jobOf(r, runs, approvals, live, fixes[r.id])).sort((a, b) => modeRank(a.mode) - modeRank(b.mode) || (b.last ? 1 : 0) - (a.last ? 1 : 0) || a.name.localeCompare(b.name, 'ja'));
   const names = Object.fromEntries(jobs.map(j => [j.id, j.name]));
-  return { shelf, runs, approvals: approvals.map(a => ({ ...a, name: names[a.job] || a.job })), recent, live, jobs, names };
+  return { shelf, runs, approvals: approvals.map(a => ({ ...a, name: names[a.job] || a.job })), recent, live, jobs, names, company, stopped, fixes };
 }
 
 async function summary(env, gh, hub) {
@@ -100,7 +146,7 @@ async function summary(env, gh, hub) {
   const builds = await listBuilds(gh, 6).catch(() => []);
   return { api: API_VERSION, setup: { finished: await setupFinished(env), shelf: !g.shelf.error, note: g.shelf.error || '' },
     counts: { jobs: g.jobs.filter(j => j.mode && j.mode !== '停止').length, running: g.jobs.filter(j => j.running).length, attention: g.approvals.length },
-    attention: g.approvals, jobs: g.jobs, recent: g.runs.slice(-10).reverse().map(r => ({ ...r, name: g.names[r.job] || r.job })), builds };
+    attention: g.approvals, fix: g.jobs.filter(j => j.mode !== '停止' && (j.needs || j.stopped)).map(j => ({ id: j.id, name: j.name, needs: j.needs, stopped: j.stopped })), jobs: g.jobs, recent: g.runs.slice(-10).reverse().map(r => ({ ...r, name: g.names[r.job] || r.job })), builds };
 }
 
 async function jobDetail(env, gh, hub, id) {
@@ -108,7 +154,7 @@ async function jobDetail(env, gh, hub, id) {
   if (!job) return null;
   const rec = (g.shelf.recipes || []).find(r => r.id === id) || {};
   return { job: { ...job, stop_words: rec.stop_words || [], limit: rec.limit || {}, ai_instruction: rec.ai_instruction || '' },
-    runs: g.runs.filter(r => r.job === id).slice(-30).reverse(), approvals: g.approvals.filter(a => a.job === id), live: g.live[id] || null,
+    runs: g.runs.filter(r => r.job === id).slice(-30).reverse(), approvals: g.approvals.filter(a => a.job === id), live: g.live[id] || null, fix: g.fixes[id] || { needs: [], stopped: [] },
     recent: (g.recent || []).filter(e => e.kind === 'run' && e.job_id === id).slice(-40) };
 }
 
@@ -118,6 +164,7 @@ const jstMs = s => { const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)/.exec(s || 
 async function notices(env, gh, hub, fp, now = Date.now()) {
   const g = await gather(env, gh, hub), builds = await listBuilds(gh, 12).catch(() => []);
   const list = [];
+  for (const i of g.stopped) { const j = g.jobs.find(x => x.name === i.name || x.id === i.name); list.push({ id: `s:${i.n}`, kind: 'error', title: `${i.name}が止まっています`, body: i.needs.length ? '会社の設定が足りません。画面から入れられます' : i.why.slice(0, 80), at: Date.parse(i.at) || now, to: j ? { page: 'job', id: j.id } : { page: 'jobs' } }); }
   for (const a of g.approvals) list.push({ id: `a:${a.n}`, kind: 'approval', title: `${a.name}：承認が必要です`, body: '外に出す前の確認待ち', at: Date.parse(a.at) || now, to: { page: 'approval', n: a.n } });
   for (const r of g.runs.slice(-200)) {
     const at = jstMs(r.at); if (now - at > WEEK) continue;
@@ -165,6 +212,33 @@ async function approvalDetail(gh, n) {
     open: iss.json.state === 'open', decided: labels.includes('承認') ? '承認' : labels.includes('却下') ? '却下' : '', at: iss.json.created_at };
 }
 
+// ── 会社の設定を保存する（画面の「直すこと」から）。入れてよいのは、どれかのレシピが参照している設定だけ・鍵らしい名前は断る・値は文字／文字の並び／名前→文字の表
+export function cleanValue(v) {
+  const str = x => typeof x === 'string' && x.trim().length > 0 && x.length <= 500;
+  if (typeof v === 'string') return str(v) ? v.trim() : null;
+  if (Array.isArray(v)) return v.length <= 50 && v.every(str) ? v.map(x => x.trim()) : null;
+  if (v && typeof v === 'object') { const e = Object.entries(v); return e.length > 0 && e.length <= 50 && e.every(([k, x]) => str(k) && k.length <= 60 && str(x)) ? Object.fromEntries(e.map(([k, x]) => [k.trim(), x.trim()])) : null; }
+  return null;
+}
+export const setPath = (o, path, v) => { const ks = path.split('.'); let cur = o; for (const k of ks.slice(0, -1)) { if (!cur[k] || typeof cur[k] !== 'object' || Array.isArray(cur[k])) cur[k] = {}; cur = cur[k]; } cur[ks[ks.length - 1]] = v; return o; };
+async function saveSetting(env, gh, hub, b) {
+  const path = String(b.path || '');
+  if (!/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+){0,5}$/.test(path)) return [{ error: '設定の名前の形が違います' }, 400];
+  if (SECRETISH.test(path)) return [{ error: '鍵・パスワードは、この画面では入れられません。設定のページで入れてください（鍵は暗号化して御社の GitHub に入ります）', code: 'secret' }, 400];
+  const g = await gather(env, gh, hub);
+  const used = new Set(); for (const r of g.shelf.recipes || []) for (const it of [...((r.blocks || {}).in || []), ...((r.blocks || {}).checks || []), ...((r.blocks || {}).out || [])]) for (const v of Object.values(it.settings || {})) for (const m of JSON.stringify(v).matchAll(REF)) used.add(m[1]);
+  if (!used.has(path)) return [{ error: 'その設定は、どの仕事も使っていません' }, 400];
+  const value = cleanValue(b.value);
+  if (value === null) return [{ error: '値を入れてください（1つの値は500字まで・表は50行まで）' }, 400];
+  const company = setPath(JSON.parse(JSON.stringify(g.company || {})), path, value);
+  await commitFiles(gh, { 'cloud/lines/company.json': { mode: '100644', content: JSON.stringify(company, null, 2) + '\n' } }, `画面：会社の設定 ${path} を入れた`);
+  let closed = 0;   // 足りない設定が原因で止まっていた知らせは、全部そろったら閉じる
+  for (const i of g.stopped) if (i.needs.length && i.needs.every(p => p === path || !empty(getPath(company, p)))) {
+    await gh('POST', `/issues/${i.n}/comments`, { body: '画面から会社の設定を入れました。次の回から動きます' }); await gh('PATCH', `/issues/${i.n}`, { state: 'closed' }); closed++;
+  }
+  return [{ ok: true, msg: `保存しました（${path}）${closed ? '。止まっていた知らせを閉じました' : ''}`, closed }, 200];
+}
+
 // ── /run/event：Actions の仕事からの段ごとの動き（承認の鍵）。封筒の欄だけを、長さを切って常駐の担当へ
 export function cleanEvent(e) {
   if (!e || typeof e !== 'object' || !TYPES.includes(e.type)) return null;
@@ -209,6 +283,7 @@ export async function appRoute(req, env, { gh, hub } = {}) {
     const b = await req.json().catch(() => null);
     if (!b || typeof b !== 'object') return send(req, env, { error: '形が違います' }, 400);
     if (path === '/app/api/notices/read') return send(req, env, await markRead(env, gh, hub, fp, b));
+    if (path === '/app/api/settings') { const [o, st] = await saveSetting(env, gh, hub, b); return send(req, env, o, st); }
     if (path === '/app/api/job/mode') { const g = await gather(env, gh, hub); const [o, st] = await changeMode(gh, b, g.jobs); return send(req, env, o, st); }
     if (path === '/app/api/approval') {
       const n = Number(b.n), d = Number.isInteger(n) && n > 0 ? await approvalDetail(gh, n) : null;
