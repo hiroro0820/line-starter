@@ -11,10 +11,11 @@
 //   GET  /app/api/builds・/app/api/build?id=・POST /app/api/ask・/app/api/build/(approve|answer|cancel)
 //                                    … 言葉で頼む（提案 → 承認 → 開発）。中身は棚の画面と同じ（shelf.js の buildRoute）
 //   POST /app/api/settings           … { path, value } 会社の設定を保存（画面の「直すこと」から・鍵は断る）
+//   POST /app/api/share              … { kind: part|recipe, name, on } 大元へ戻す印（custom/share.json）を付ける・外す。御社だけの部品・仕事だけ（夜の share.yml が確かめて申し出る）
 //   POST /app/api/live-ticket        … ライブ表示（WebSocket）の切符（60秒・1回だけ）。/live?ticket=<切符> でつなぐ
 //   POST /run/event                  … Actions の仕事から段ごとの動き（live.py・承認の鍵で確かめる）→ 常駐の担当が画面へ配る
 import { allowedOrigins, deviceOf } from './device.js';
-import { shelfData, buildRoute, listBuilds } from './shelf.js';
+import { shelfData, buildRoute, listBuilds, toggleShare } from './shelf.js';
 import { commitFiles } from './github_app.js';
 import { monthUsage } from './usage.js';
 import { addInstruction, decideApproval, setupFinished } from './setup.js';
@@ -161,9 +162,25 @@ async function jobDetail(env, gh, hub, id) {
   const g = await gather(env, gh, hub), job = g.jobs.find(j => j.id === id);
   if (!job) return null;
   const rec = (g.shelf.recipes || []).find(r => r.id === id) || {};
-  return { job: { ...job, stop_words: rec.stop_words || [], limit: rec.limit || {}, ai_instruction: rec.ai_instruction || '' },
+  return { job: { ...job, stop_words: rec.stop_words || [], limit: rec.limit || {}, ai_instruction: rec.ai_instruction || '' }, share: shareItems(g.shelf, rec),
     runs: g.runs.filter(r => r.job === id).slice(-30).reverse(), approvals: g.approvals.filter(a => a.job === id), live: g.live[id] || null, fix: g.fixes[id] || { needs: [], stopped: [], trial: null },
     recent: (g.recent || []).filter(e => e.kind === 'run' && e.job_id === id).slice(-40) };
+}
+
+// ── 大元へ戻す印：この仕事が使う御社だけの部品（custom）と、御社だけの仕事そのもの。印は custom/share.json（shelf.js の toggleShare と同じ決まり）
+export function shareItems(shelf, rec) {
+  const s = shelf.share || {}, b = rec.blocks || {};
+  const used = new Set([...(rec.in || []).map(x => x.part), ...(rec.checks || []), ...(rec.out || []), ...[...(b.in || []), ...(b.checks || []), ...(b.out || [])].map(x => x.part)]);
+  const items = (shelf.parts || []).filter(p => p.custom && used.has(p.name)).map(p => ({ kind: 'part', name: p.name, desc: p.desc || '', on: (s.parts || []).includes(p.name) }));
+  if (rec.kind === 'お客様だけ') items.push({ kind: 'recipe', name: rec.id, desc: rec.name || rec.id, on: (s.recipes || []).includes(rec.id) });
+  return items;
+}
+async function saveShare(gh, b) {
+  const data = await shelfData(gh); if (data.error) return [{ error: data.error }, 409];
+  const r = toggleShare(data, data.share, { kind: b.kind === 'recipe' ? 'recipe' : 'part', name: String(b.name || ''), on: b.on !== false });
+  if (r.error) return [r, 400];
+  await commitFiles(gh, { 'cloud/lines/custom/share.json': { mode: '100644', content: JSON.stringify(r.share) + '\n' } }, `画面：大元へ戻す印を${b.on === false ? '外した' : '付けた'}：${b.name}`);
+  return [{ ok: true, share: r.share, msg: b.on === false ? '大元へ戻す印を外しました' : '印を付けました。今夜21時ごろに確かめ（テスト・個人情報）が走り、通れば Orbit の担当が中身を見て取り込みます' }, 200];
 }
 
 // ── 通知センター：お客様の記録から組み立てる（大元には置かない）。既読はこの端末ごと（read:<端末の指紋>）
@@ -292,6 +309,7 @@ export async function appRoute(req, env, { gh, hub } = {}) {
     if (!b || typeof b !== 'object') return send(req, env, { error: '形が違います' }, 400);
     if (path === '/app/api/notices/read') return send(req, env, await markRead(env, gh, hub, fp, b));
     if (path === '/app/api/settings') { const [o, st] = await saveSetting(env, gh, hub, b); return send(req, env, o, st); }
+    if (path === '/app/api/share') { const [o, st] = await saveShare(gh, b); return send(req, env, o, st); }
     if (path === '/app/api/job/mode') { const g = await gather(env, gh, hub); const [o, st] = await changeMode(gh, b, g.jobs); return send(req, env, o, st); }
     if (path === '/app/api/approval') {
       const n = Number(b.n), d = Number.isInteger(n) && n > 0 ? await approvalDetail(gh, n) : null;
