@@ -121,7 +121,7 @@ export function needsOf(rec, company, parts) {   // そのレシピで足りな�
 }
 // ── 準備：仕事が動くのに要る鍵と Google の範囲を、部品の宣言（shelf.json の needs）から全部割り出す（10/22 オーナー：あとから出さない・一度で・最小）
 export const SCOPE_WORDS = { 'drive.file': '台帳とファイル', 'calendar.readonly': 'カレンダーを読む', 'calendar.events': 'カレンダーに予定を入れる', 'gmail.send': 'メールを送る' };
-const COVERS = { 'calendar.readonly': ['calendar.readonly', 'calendar.events', 'calendar'], 'calendar.events': ['calendar.events', 'calendar'], 'drive.file': ['drive.file', 'drive', 'spreadsheets'], 'gmail.send': ['gmail.send', 'gmail.compose', 'gmail.modify'] };
+const COVERS = { 'calendar.readonly': ['calendar.readonly', 'calendar'], 'calendar.events': ['calendar.events', 'calendar'], 'drive.file': ['drive.file', 'drive', 'spreadsheets'], 'gmail.send': ['gmail.send', 'gmail.compose', 'gmail.modify'] };
 const shortScope = x => String(x).split('/auth/').pop();
 export const covered = (sc, have) => (have || []).some(h => (COVERS[sc] || [sc]).includes(shortScope(h)));
 const KEY_NAME = /^[A-Z][A-Z0-9_]{2,60}$/;
@@ -149,11 +149,10 @@ export function prepOf(rec, parts, have, trial) {
   }
   return { keys: [...keys].map(([name, part]) => ({ name, part })), google: [...google].map(([scope, part]) => ({ scope, part, words: SCOPE_WORDS[scope] || scope })) };
 }
-// 求める範囲：動いている全部の仕事が要る物＋もう持っている物（include_granted_scopes で前の許可も残る）。書き込みがあれば読むだけの範囲は求めない
+// 求める範囲：動いている全部の仕事が要る物＋もう持っている物（include_granted_scopes で前の許可も残る）。calendar.events があっても calendar.readonly は残す（一覧の calendarList は readonly が要る・10/22）
 export function scopesToAsk(g) {
   const want = new Set((g.have.scopes || []).map(shortScope).filter(x => GOOGLE_SCOPES_OK.includes(x)));
   for (const r of g.shelf.recipes || []) if (r.mode !== '停止') for (const x of (g.fixes[r.id] || {}).prep?.google || []) want.add(x.scope);
-  if (want.has('calendar.events')) want.delete('calendar.readonly');
   return [...want].filter(x => GOOGLE_SCOPES_OK.includes(x));
 }
 async function saveSecret(env, gh, g, b) {
