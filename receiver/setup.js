@@ -473,6 +473,8 @@ export async function coreUpdate(env, gh = repoApi(env), fetcher = fetch) {
   const d = await check();
   if (d.status !== 204) { await drop(); return { state: 'error', msg: `互換の確かめを起こせませんでした（${d.status}）` }; }
   await env.CONFIG.put(`upd_at:${h}`, String(t));
+  const olds = await gh('GET', '/git/matching-refs/heads/orbit-update/');   // まだ決めていない古い版の枝は片付ける（知らせが何通も残り、どれを押すか迷わないように・10/22）
+  for (const x of (olds.status === 200 && Array.isArray(olds.json) ? olds.json : [])) { const n = String(x.ref || '').replace('refs/heads/', ''); if (n.startsWith('orbit-update/') && n !== branch) await gh('DELETE', `/git/refs/heads/${n}`); }
   return { state: 'checking', version: b.version };
 }
 
@@ -483,7 +485,7 @@ async function updatePage(req, env, gh, h, url) {
   if (!key || !same(url.searchParams.get('s') || '', await hmac(key, `u:${h}`))) return page('更新', '<h1>このリンクは使えません</h1><p class="muted">知らせの中のリンクから開いてください</p>');
   const branch = `orbit-update/${h}`;
   const ref = await gh('GET', `/git/ref/heads/${branch}`);
-  if (ref.status !== 200) return page('更新', '<h1>この版はもう取り込み済みか、なくなっています</h1>');
+  if (ref.status !== 200) return page('更新', '<h1>この版はもう取り込み済みか、新しい版に置き換わりました</h1><p class="muted">いちばん新しい「新しい版があります」の知らせから取り込んでください</p>');
   const cm = await gh('GET', `/contents/cloud/lines/core.json?ref=${encodeURIComponent(branch)}`);
   let ver = ''; try { ver = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cm.json.content).replace(/\s/g, '')), c => c.charCodeAt(0)))).version || ''; } catch { }
   if (req.method === 'POST') { const r = await decideUpdate(env, gh, h, ver, (await form(req)).ok === 'true'); return page('更新', `<h1>${r.title}</h1>${r.html}`); }
@@ -567,7 +569,7 @@ async function reactionIn(m, c, env, ctx, gh, fetcher = fetch) {
     await env.CONFIG.put(`seen:r:${u[1]}`, '1', { expirationTtl: 600 });
     const ref = await gh('GET', `/git/ref/heads/orbit-update/${u[1]}`);
     let r;
-    if (ref.status !== 200) r = { title: 'この版はもう取り込み済みか、なくなっています', text: '' };
+    if (ref.status !== 200) r = { title: 'この版はもう取り込み済みか、新しい版に置き換わりました', text: 'いちばん新しい「新しい版があります」の知らせに ✅ を押してください' };
     else {
       const cm = await gh('GET', `/contents/cloud/lines/core.json?ref=${encodeURIComponent(`orbit-update/${u[1]}`)}`);
       let ver = ''; try { ver = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(String(cm.json.content).replace(/\s/g, '')), x => x.charCodeAt(0)))).version || ''; } catch { }
