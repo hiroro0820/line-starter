@@ -5,6 +5,9 @@
 const dec = new TextDecoder();
 const unb64 = s => Uint8Array.from(atob(String(s).replace(/\s/g, '')), c => c.charCodeAt(0));
 const CACHE_MS = 10 * 60 * 1000;
+// 費用の見せ方（10/23 オーナー：円が先）。率は大元の cloud/config/rate.json と同じ値（変えたらここも）
+const USD_JPY = 157;
+export const yen = usd => { const u = Number(usd) || 0, v = u * USD_JPY; return `約${v >= 10 ? Math.round(v).toLocaleString('ja-JP') : v >= 1 ? v.toFixed(1) : v.toFixed(2)}円（$${u >= 0.01 || u === 0 ? u.toFixed(2) : u.toFixed(4)}）`; };
 
 export const monthOf = (now = Date.now()) => new Date(now + 9 * 3600e3).toISOString().slice(0, 7);   // 日本時間の「年-月」
 export function runMinutes(runs) {
@@ -49,6 +52,6 @@ export async function monthUsage(env, gh, now = Date.now(), fresh = false) {
 export function budgetGuard(u) {
   if (!u) return null;
   if (u.actions_min >= u.actions_limit * 0.95) return `今月の GitHub Actions の分が上限に近いので、新しく作るのを止めています（${u.actions_min} / ${u.actions_limit}分）。来月になるか、会社の設定 limits.actions_minutes を上げると再開します`;
-  if (u.ai_limit && u.ai_usd >= u.ai_limit) return `今月の AI の費用が上限に達したので、新しく作るのを止めています（$${u.ai_usd} / $${u.ai_limit}）`;
+  if (u.ai_limit && u.ai_usd >= u.ai_limit) return `今月の AI の費用が上限に達したので、新しく作るのを止めています（${yen(u.ai_usd)} / ${yen(u.ai_limit)}）`;
   return null;
 }
